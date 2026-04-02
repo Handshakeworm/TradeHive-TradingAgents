@@ -12,7 +12,9 @@ def create_neutral_debator(llm):
         current_conservative_response = risk_debate_state.get("current_conservative_response", "")
 
         market_research_report = state["market_report"]
+        crypto_report = state.get("crypto_report", "")
         sentiment_report = state["sentiment_report"]
+        community_report = state.get("community_report", "")
         news_report = state["news_report"]
         fundamentals_report = state["fundamentals_report"]
 

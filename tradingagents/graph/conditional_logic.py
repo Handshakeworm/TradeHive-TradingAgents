@@ -43,6 +43,30 @@ class ConditionalLogic:
             return "tools_fundamentals"
         return "Msg Clear Fundamentals"
 
+    def should_continue_sentiment(self, state: AgentState):
+        """Determine if quantitative sentiment analysis should continue."""
+        messages = state["messages"]
+        last_message = messages[-1]
+        if last_message.tool_calls:
+            return "tools_sentiment"
+        return "Msg Clear Sentiment"
+
+    def should_continue_crypto(self, state: AgentState):
+        """Determine if crypto market analysis should continue."""
+        messages = state["messages"]
+        last_message = messages[-1]
+        if last_message.tool_calls:
+            return "tools_crypto"
+        return "Msg Clear Crypto"
+
+    def should_continue_macro(self, state: AgentState):
+        """Determine if macro economic analysis should continue."""
+        messages = state["messages"]
+        last_message = messages[-1]
+        if last_message.tool_calls:
+            return "tools_macro"
+        return "Msg Clear Macro"
+
     def should_continue_debate(self, state: AgentState) -> str:
         """Determine if debate should continue."""
 

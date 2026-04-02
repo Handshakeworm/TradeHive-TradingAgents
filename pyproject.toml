@@ -31,6 +31,11 @@ dependencies = [
     "tqdm>=4.67.1",
     "typing-extensions>=4.14.0",
     "yfinance>=0.2.63",
+    # ── 新增数据源依赖 ──────────────────────────────────────────────────────
+    "fredapi>=0.5.1",           # FRED 宏观经济数据（免费 API Key）
+    "vaderSentiment>=3.3.2",    # VADER 情绪分析（纯离线，无需 API Key）
+    "pyarrow>=14.0.0",          # Parquet 本地缓存（pandas 依赖）
+    "praw>=7.7.0",              # Reddit API（可选，不填 credentials 则跳过）
 ]
 
 [project.scripts]

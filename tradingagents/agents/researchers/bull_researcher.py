@@ -11,11 +11,17 @@ def create_bull_researcher(llm, memory):
 
         current_response = investment_debate_state.get("current_response", "")
         market_research_report = state["market_report"]
+        crypto_report = state.get("crypto_report", "")
         sentiment_report = state["sentiment_report"]
+        community_report = state.get("community_report", "")
         news_report = state["news_report"]
         fundamentals_report = state["fundamentals_report"]
 
         curr_situation = f"{market_research_report}\n\n{sentiment_report}\n\n{news_report}\n\n{fundamentals_report}"
+        if crypto_report:
+            curr_situation += f"\n\nCrypto Market Report:\n{crypto_report}"
+        if community_report:
+            curr_situation += f"\n\nCommunity Sentiment Report:\n{community_report}"
         past_memories = memory.get_memories(curr_situation, n_matches=2)
 
         past_memory_str = ""

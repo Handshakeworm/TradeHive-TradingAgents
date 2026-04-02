@@ -24,6 +24,22 @@ from .alpha_vantage import (
 )
 from .alpha_vantage_common import AlphaVantageRateLimitError
 
+# ── 新增数据源 ──────────────────────────────────────────────────────────────
+from .coingecko import (
+    get_crypto_price,
+    get_crypto_historical,
+    get_crypto_market_overview,
+)
+from .fred_macro import (
+    get_macro_indicator,
+    get_macro_snapshot,
+    list_available_macro_series,
+)
+from .sentiment_utils import (
+    get_news_sentiment,
+    get_reddit_sentiment,
+)
+
 # Configuration and routing logic
 from .config import get_config
 
@@ -57,12 +73,39 @@ TOOLS_CATEGORIES = {
             "get_global_news",
             "get_insider_transactions",
         ]
-    }
+    },
+    # ── 新增数据类别 ──────────────────────────────────────────────────────────
+    "crypto_data": {
+        "description": "Cryptocurrency market data (real-time & historical)",
+        "tools": [
+            "get_crypto_price",
+            "get_crypto_historical",
+            "get_crypto_market_overview",
+        ]
+    },
+    "macro_data": {
+        "description": "Macroeconomic indicators via FRED",
+        "tools": [
+            "get_macro_indicator",
+            "get_macro_snapshot",
+            "list_available_macro_series",
+        ]
+    },
+    "sentiment_data": {
+        "description": "News & social media sentiment scoring (VADER)",
+        "tools": [
+            "get_news_sentiment",
+            "get_reddit_sentiment",
+        ]
+    },
 }
 
 VENDOR_LIST = [
     "yfinance",
     "alpha_vantage",
+    "coingecko",   # 加密货币，免费无 API Key
+    "fred",        # 宏观经济，免费需申请 API Key
+    "vader",       # 情绪分析，纯离线无 API Key
 ]
 
 # Mapping of methods to their vendor-specific implementations
@@ -106,6 +149,33 @@ VENDOR_METHODS = {
     "get_insider_transactions": {
         "alpha_vantage": get_alpha_vantage_insider_transactions,
         "yfinance": get_yfinance_insider_transactions,
+    },
+    # ── 新增：加密货币（coingecko） ──────────────────────────────────────────
+    "get_crypto_price": {
+        "coingecko": get_crypto_price,
+    },
+    "get_crypto_historical": {
+        "coingecko": get_crypto_historical,
+    },
+    "get_crypto_market_overview": {
+        "coingecko": get_crypto_market_overview,
+    },
+    # ── 新增：宏观经济（fred） ───────────────────────────────────────────────
+    "get_macro_indicator": {
+        "fred": get_macro_indicator,
+    },
+    "get_macro_snapshot": {
+        "fred": get_macro_snapshot,
+    },
+    "list_available_macro_series": {
+        "fred": list_available_macro_series,
+    },
+    # ── 新增：情绪分析（vader） ─────────────────────────────────────────────
+    "get_news_sentiment": {
+        "vader": get_news_sentiment,
+    },
+    "get_reddit_sentiment": {
+        "vader": get_reddit_sentiment,
     },
 }
 

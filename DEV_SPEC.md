@@ -43,14 +43,34 @@
 - 支持通过 config 切换模型
 - 撰写研究报告并制作演示，将多 agent bot 与经典基准进行对比
 
-# Pending
-## 光神设计工作（如有哪个觉得不好做可以告知）
+# Processing
+## 前期数据设计工作
 
 **完成以下的设计即可不用具体实施，写为 spec 技术文档形式**
 
 ### 1. 确定测试品种与时间窗口
 
-- 参考配置：NVDA 2024-05-10；也可替换为其他主流美股（如 AAPL、MSFT）或其他日期区间
+**选定配置（已写入 `main.py`）：**
+
+| 参数 | 值 | 说明 |
+|------|-----|------|
+| 股票品种 | `NVDA` | NVIDIA，AI 主题龙头，波动大、新闻丰富，适合情绪 / 基本面 agent 分析 |
+| 分析日期 | `2024-05-10` | 英伟达财报季前后，市场情绪复杂，测试价值高 |
+| 加密品种 | `BTC` | 比特币，对应 `crypto` analyst，同一日期区间 |
+| 可替换选项 | `AAPL 2024-06-15`, `MSFT 2024-07-20` | 均为主流美股，数据完整 |
+
+**运行方式**：直接执行 `python main.py`，其中已预设 NVDA / 2024-05-10 标准配置。
+
+**数据采集模式（结论）：**
+
+> 采用**按需拉取（On-demand Fetch）**，而非预先建立离线数据库。
+>
+> - 每次运行时，各 Agent 工具函数直接调用 yfinance / CoinGecko / FRED API 获取数据（**实时拉取**）
+> - 首次拉取后，数据自动写入 `./data_cache/{category}/{symbol}/{start}_{end}.parquet`（**Parquet 本地缓存**）
+> - 后续再次运行时，若缓存命中则跳过 API 调用，类似"懒加载离线库"（**缓存后可离线复用**）
+> - **无需预先手动建库**——缓存在 Agent 实际运行过程中自动积累
+>
+> 实时与离线并不矛盾：首次运行为实时，之后命中缓存即为离线。这是本项目数据层的核心设计选择。
 
 ### 2. 扩展数据源
 
@@ -60,7 +80,323 @@
 - **市场覆盖**：集成港股、A 股、加密货币等市场数据接口（**教授说加密有加分，这个最好要有，别的都行**）
 - **数据类型**：增加 alternative data、社交媒体情绪、宏观经济指标
 
+**数据源参考使用**：
+- **实时数据源**：
+    - Alpha Vantage（免费版）：
+        -- 提供股票、外汇、加密货币的实时数据。
+        -- 每分钟 5 次请求限制，适合低频实时需求。
+    - Tiingo（免费试用）：
+        -- 提供股票和外汇的实时数据。
+        -- 需要注册 API 密钥。
+    - CoinGecko（加密货币）：
+        -- 提供加密货币的实时价格、交易量等数据。
+        -- 无需 API 密钥，完全免费。
+    - 新浪财经（港股、A 股）：
+        -- 提供实时行情数据，适合中国市场。
+    - **采集**：
+        - 职责：采集实时数据，供 Agent 在运行时分析。
+        - 实现方式：
+            -- 使用 WebSocket 或定时任务定期拉取实时数据。
+            -- 数据源：Alpha Vantage、Tiingo、CoinGecko、新浪财经。
+- **离线数据源**：
+    - Yahoo Finance（yfinance）：
+        -- 提供股票的历史数据和技术指标。
+        -- 免费且易用，适合离线回测。
+    - Quandl（现为 Nasdaq Data Link）：
+        -- 提供经济指标、股票历史数据。
+        -- 免费数据集有限，但适合离线分析。
+    - FRED（美国经济数据）：
+        -- 提供宏观经济指标（如利率、CPI）。
+        -- 免费且数据质量高。
+    - SEC EDGAR：
+        -- 提供公司财务报告（10-K、10-Q）。
+        -- 免费，适合离线分析。
+    - **采集**：
+        - 职责：采集历史数据，供回测和向量化检索。
+        - 实现方式：
+            -- 使用批量请求拉取历史数据。
+            -- 数据源：yfinance、Quandl、FRED、SEC EDGAR。
+
+---
+
+### ✅ 已实现方案（2026-03-28）
+
+**原则**：免费优先、零 API Key 优先、自动缓存、#3 直接复用。
+
+#### 数据类型与数据源选型
+
+| 数据类别 | 数据源 | API Key | 实时/离线 | 说明 |
+|----------|--------|---------|-----------|------|
+| 股票 OHLCV | `yfinance` | 不需要 | 两者 | 已有，保留 |
+| 技术指标 | `yfinance` / `alpha_vantage` | 可选 | 两者 | 已有，保留 |
+| 基本面 | `yfinance` | 不需要 | 离线 | 已有，保留 |
+| 新闻 | `yfinance` | 不需要 | 实时 | 已有，保留 |
+| **加密货币** | **CoinGecko** | **不需要** | **两者** | ✅ 新增，重点实现 |
+| **宏观经济** | **FRED** | **免费申请** | **离线为主** | ✅ 新增，覆盖利率/CPI/VIX |
+| **新闻情绪** | **VADER on yfinance** | **不需要** | **两者** | ✅ 新增，零额外依赖 |
+| **社交情绪** | **Reddit PRAW（可选）** | **免费申请** | **实时** | ✅ 新增，不填则降级为新闻情绪 |
+
+#### 日K数据市场覆盖（2026-03-29 确认）
+
+通过 **yfinance 一个库**，只需修改 ticker 格式即可接入以下市场，无需切换数据源：
+
+| 市场 | Ticker 格式示例 | 状态 | 备注 |
+|------|----------------|------|------|
+| 美股 | `AAPL`, `NVDA` | ✅ 完整 | 主要测试品种 |
+| 港股 | `0700.HK` | ✅ 可用 | 加 `.HK` 后缀 |
+| A股 | `600519.SS`, `000001.SZ` | ✅ 可用 | 上证加 `.SS`，深证加 `.SZ`；部分数据有缺口 |
+| 日股 | `7203.T` | ✅ 可用 | 加 `.T` 后缀 |
+| 加密货币 | `BTC`（内部转为 `BTC-USD`）| ✅ 完整 | 24/7 无节假日，无市场间歇 |
+| 外汇 | `EURUSD=X` | ⚠️ yfinance 支持 | 框架未封装，需时可扩展 |
+| 大宗商品 | `GC=F`（黄金）, `CL=F`（原油）| ⚠️ yfinance 支持 | 同上 |
+
+**结论**：核心测试品种（美股 + 加密货币）已完整覆盖，港股/A股可用但不作为主要测试对象。
+
+#### 实时 vs 离线——问题回答
+
+> **哪种方式免费且不需大量人工维护？**
+> 
+> - **最优选：按需拉取（On-demand Fetch）**——Agent 运行时直接调用数据函数，无需维护任何定时任务或 WebSocket 连接。yfinance / CoinGecko / FRED 均支持。
+> - 定时任务/WebSocket 适合生产级系统，本项目以研究为主，按需拉取即可。
+
+#### 历史数据存储是否必要？
+
+> **必要，但无需数据库**——采用 Parquet 文件缓存：
+> - 首次调用 → 写入 `data_cache/{category}/{symbol}/` 目录
+> - 后续调用 → 命中缓存则直接返回，跳过 API 调用
+> - #3 RAP 向量库直接 `load_dataframe()` 读取，无需重复采集逻辑
+> - 文件结构：`data_cache/crypto/BTC/2024-01-01_2024-12-31.parquet`
+
+#### 数据格式标准（口径一致）
+
+所有数据函数统一返回**带 header 注释的 CSV 字符串**（与现有 yfinance 函数一致，供 LLM 直接阅读），同时在内部将 DataFrame 写入 Parquet 缓存（供 #3 使用）。
+
+**标准列命名**（所有 OHLCV 类数据）：
+
+```
+date, open, high, low, close, volume
+```
+
+**情绪数据标准列**：
+
+```
+date, title, sentiment (POSITIVE/NEUTRAL/NEGATIVE), compound, positive, negative
+```
+
+**宏观数据标准列**：
+
+```
+date, value, series_id, description
+```
+
+#### 新增文件清单
+
+| 文件 | 职责 |
+|------|------|
+| `tradingagents/dataflows/coingecko.py` | CoinGecko 加密货币数据（实时+历史） |
+| `tradingagents/dataflows/fred_macro.py` | FRED 宏观经济指标（历史序列+快照） |
+| `tradingagents/dataflows/sentiment_utils.py` | VADER 情绪评分（新闻+可选 Reddit） |
+| `tradingagents/dataflows/local_cache.py` | Parquet 缓存读写（#3 直接调用） |
+
+#### 配置方式（`default_config.py` / `main.py`）
+
+```python
+config["data_vendors"] = {
+    "crypto_data": "coingecko",   # 无需 API Key
+    "macro_data": "fred",         # 需 FRED_API_KEY（.env）
+    "sentiment_data": "vader",    # 无需 API Key
+}
+```
+
+#### 待补充内容（此实现未覆盖）
+
+- **SEC EDGAR 财务报告采集**：10-K/10-Q 结构化解析（归属 #3，但采集接口可在此加）
+- **数据采集脚本（批量历史预加载）**：供 #7 交付物使用，需单独编写
+- **降级策略**：当 CoinGecko rate limit 触发时，自动降级到 yfinance 加密报价
+
+#### 社媒评论时间过滤（2026-03-29 确认）
+
+**核心要求**：社媒评论必须能按时间区分，确保回测时不使用未来数据。
+
+| 数据源 | 时间字段 | 过滤机制 | 状态 |
+|--------|---------|---------|------|
+| yfinance 新闻 | `providerPublishTime`（Unix 时间戳） | 精确过滤到 `[date - lookback_days, date]` 窗口 | ✅ 已实现 |
+| Reddit PRAW | `post.created_utc`（Unix 时间戳） | 精确过滤到同一窗口；`time_filter="month"` 仅用于扩大候选集 | ✅ 已修复（原为硬编码 `week`，`date` 参数未生效）|
+
+**已修复 Bug（`sentiment_utils.py`）**：原 `get_reddit_sentiment()` 使用 `time_filter="week"` 硬编码，传入的 `date` 参数未被用于实际时间过滤。修复后改为 `time_filter="month"` 拉取更多候选，再通过 `post.created_utc` 按 `date` 参数精确筛选。
+
+**已知限制**：yfinance `ticker.news` 只返回最近约 8 篇文章，不支持历史查询；历史回测日期较早时情绪数据可能为空，代码中已注释说明。Reddit 时间过滤已精确到日。
+
+---
+
+### 数据流全链路梳理（2026-03-29）
+
+#### 一、数据从采集到决策的完整路径
+
+```
+外部 API / 本地缓存
+    │
+    ▼
+dataflows/ 采集层（coingecko.py / fred_macro.py / sentiment_utils.py / y_finance.py 等）
+    │  返回格式化 CSV 字符串 + 写 Parquet 缓存
+    ▼
+interface.py route_to_vendor()  ← 统一路由入口，按 config["data_vendors"] 分配到对应 vendor
+    │
+    ▼
+agents/utils/ 工具层（@tool 函数包装，LangChain Tool 格式）
+    │  get_crypto_historical / get_news_sentiment / get_macro_snapshot 等
+    ▼
+agents/analysts/ 分析师节点（LangGraph 节点，调用 LLM + 工具）
+    │  每个 Analyst 将分析报告写入 AgentState 对应字段
+    │  market_analyst → state["market_report"]
+    │  news_analyst   → state["news_report"]
+    │  social_media_analyst / sentiment_analyst → state["sentiment_report"]
+    │  fundamentals_analyst → state["fundamentals_report"]
+    │  crypto_analyst → state["market_report"]
+    │  macro_analyst  → state["news_report"]
+    ▼
+Bull/Bear Researcher（读取上述报告字段，生成多空辩论）
+    │
+    ▼
+Research Manager（汇总辩论 → investment_plan）
+    │
+    ▼
+Trader（读取 investment_plan + 报告 → trader_investment_plan）
+    │
+    ▼
+Risk Debaters × 3（Aggressive / Conservative / Neutral，读取 trader_investment_plan）
+    │
+    ▼
+Portfolio Manager（读取风险辩论结果 → 最终决策 BUY/HOLD/SELL）
+    │
+    ▼
+SignalProcessor（提取单词决策标签）→ 输出
+```
+
+#### 二、各数据类型的具体用途
+
+| 数据类型 | 采集函数 | 消费的 Analyst | 写入字段 | 传递给下游 |
+|----------|---------|--------------|---------|-----------|
+| 股票日K OHLCV | `get_stock_data` | market_analyst | `market_report` | Bull/Bear/Trader/Risk |
+| 技术指标 | `get_indicators` | market_analyst | `market_report` | 同上 |
+| 财务报表 | `get_fundamentals/balance_sheet/cashflow/income_statement` | fundamentals_analyst | `fundamentals_report` | 同上 |
+| 新闻标题 | `get_news`, `get_global_news` | news_analyst | `news_report` | 同上 |
+| 社媒情绪（VADER评分） | `get_news_sentiment`, `get_reddit_sentiment` | sentiment_analyst / social_media_analyst | `sentiment_report` | 同上 |
+| 加密货币 OHLCV | `get_crypto_historical`, `get_crypto_price` | crypto_analyst | `market_report` | 同上 |
+| 宏观经济指标 | `get_macro_snapshot`, `get_macro_indicator` | macro_analyst | `news_report` | 同上 |
+| 历史决策记忆 | BM25 检索 `FinancialSituationMemory` | Bull/Bear Researcher | `investment_debate_state` | Research Manager |
+
+#### 三、数据层潜在问题清单
+
+**P1 — 高优先级（影响回测正确性）**
+
+1. **yfinance 新闻无历史查询能力**
+   - 现状：`ticker.news` 仅返回当前最近 ~8 篇，不支持按日期范围拉取历史新闻
+   - 影响：回测历史日期时（如 2024-05-10），新闻情绪数据可能为空或返回的是今天的新闻
+   - 后果：情绪分析在历史回测中基本失效，sentiment_report 字段为空，下游辩论缺少情绪输入
+   - 状态：⚠️ **待解决** — 代码已注释说明此限制；严格历史回测需接入 NewsAPI / GNews（有免费层，支持 30 天历史），超出当前任务范围
+
+2. **CoinGecko 免费 API 限速严重**
+   - 现状：公共端点无 API Key 时限速约 10-30 req/min，当 crypto analyst 连续调用多个工具时极易触发
+   - 影响：工具调用失败或需等待 60 秒，整个 Agent 推理链中断
+   - 状态：⚠️ **部分缓解** — `get_crypto_historical` 已优先走 yfinance（`BTC-USD`），CoinGecko 只用于实时快照；`_cg_get()` 已有 429 指数退避重试（等待 60s）。回测脚本建议跳过 `get_crypto_price` 实时快照工具调用，只用 `get_crypto_historical`
+
+3. **FRED 数据发布存在滞后（Reporting Lag）**
+   - 原状：宏观指标（如 CPI）通常滞后 2-6 周发布，`get_macro_snapshot` 和 `get_macro_indicator` 未区分"发布日"与"数据日"
+   - 影响：回测中可能使用了当时尚未公开的数据（未来泄漏），在严格 Walk-forward 验证中违规
+   - 状态：✅ **已修复（2026-03-29）** — `fred_macro.py` 所有 `fred.get_series()` 调用均加入 `realtime_start=date, realtime_end=date` 参数，FRED API 自动只返回该日期前已公开发布的数据，消除未来泄漏
+
+4. **social_media_analyst 与 sentiment_analyst 写入同一字段冲突**
+   - 原状：两者都写 `state["sentiment_report"]`，同时选入时后执行的覆盖前者，一份报告被静默丢弃
+   - 状态：✅ **已修复（2026-03-29）** — `social_media_analyst` 改写 `state["community_report"]`（社区舆情脉冲）；`sentiment_analyst` 保持写 `state["sentiment_report"]`（VADER 定量评分）；`AgentState` 新增 `community_report` 字段；8 个下游节点（bull/bear researcher、research_manager、portfolio_manager、trader、3×风险辩手）均增加读取 `community_report` 并条件性拼入 `curr_situation`
+
+5. **crypto_analyst 与 market_analyst 写入同一字段冲突**
+   - 原状：两者都写 `state["market_report"]`，同时选中时后者覆盖前者
+   - 状态：✅ **已修复（2026-03-29）** — `crypto_analyst` 改写 `state["crypto_report"]`；`AgentState` 新增 `crypto_report` 字段；所有下游节点同步更新，条件性读取并拼入 `curr_situation`
+
+**P2 — 中优先级（影响数据完整性）**
+
+6. **Parquet 缓存无版本控制**
+   - 现状：缓存文件名为 `{start}_{end}.parquet`，若同一日期范围的数据被更新（如 yfinance 回填历史），旧缓存不会自动失效
+   - 建议：写缓存时附加数据源版本或写入时间戳，提供 `--force-refresh` 标志
+
+7. **加密货币 Ticker 映射表覆盖不全**
+   - 现状：`CRYPTO_ID_MAP` 仅预置 15 个主流币，其余 ticker 通过 `upper().lower()` 猜测 CoinGecko ID，高概率失败
+   - 建议：接入 CoinGecko `/coins/list` 动态构建映射，或给出明确错误提示
+
+8. **macro_analyst 与 news_analyst 写入同一字段**
+   - 同 P1-4/5 同类问题：macro_analyst 写 `state["news_report"]`，与 news_analyst 冲突
+   - 建议：macro_analyst 写入 `state["macro_report"]`
+
+**P3 — 低优先级（可接受的已知限制）**
+
+9. **Reddit 仅能查询近 1 个月内的帖子**（PRAW `time_filter` 最长为 `year`，但实际可用历史有限）
+10. **yfinance A股/港股数据存在缺口**（如停牌日、ST股退市等特殊情况未处理）
+11. **技术指标需足够历史数据预热**（如 200-SMA 需要至少 200 天数据，若传入窗口不足会产生 NaN）
+
+
 > **与 #3 的分工边界**：本任务只做数据接入与存储，不涉及向量化；宏观指标、情绪数据等同时被 #2（实时输入）和 #3（历史检索）使用，采集接口统一在此定义，#3 直接调用。
+
+---
+
+#### Agent 层集成（完整实现记录，2026-03-28）
+
+除数据采集层外，同步完成了 Agent 层的完整接入，使新数据源可被 LangGraph 工作流中的 LLM 直接调用。
+
+##### 新增工具文件（`tradingagents/agents/utils/`）
+
+| 文件 | 包含 LangChain `@tool` | 说明 |
+|------|------------------------|------|
+| `crypto_tools.py` | `get_crypto_price`, `get_crypto_historical`, `get_crypto_market_overview` | 代理调用 `route_to_vendor()` → CoinGecko / yfinance |
+| `macro_tools.py` | `get_macro_indicator`, `get_macro_snapshot`, `list_available_macro_series` | 代理调用 → FRED |
+| `sentiment_tools.py` | `get_news_sentiment`, `get_reddit_sentiment` | 代理调用 → VADER |
+
+##### 新增 Analyst Agent 文件（`tradingagents/agents/analysts/`）
+
+| 文件 | 写入字段 | 绑定工具 |
+|------|----------|----------|
+| `crypto_analyst.py` | `state["crypto_report"]`（原为 `market_report`，已修复字段冲突） | `get_crypto_price`, `get_crypto_historical`, `get_crypto_market_overview`, `get_macro_snapshot` |
+| `sentiment_analyst.py` | `state["sentiment_report"]` | `get_news`, `get_news_sentiment`, `get_reddit_sentiment` |
+| `macro_analyst.py` | `state["news_report"]` | `get_macro_snapshot`, `get_macro_indicator`, `list_available_macro_series` |
+
+##### 修改的现有文件
+
+| 文件 | 变更内容 |
+|------|--------|
+| `tradingagents/dataflows/interface.py` | 新增 `crypto_data` / `macro_data` / `sentiment_data` VENDOR 类别；注册 8 个新函数的路由映射 |
+| `tradingagents/default_config.py` | `data_vendors` 新增 `crypto_data: coingecko`, `macro_data: fred`, `sentiment_data: vader`；新增 `data_cache_enabled` / `data_cache_dir` |
+| `.env.example` | 新增 `FRED_API_KEY`, `REDDIT_CLIENT_ID`, `REDDIT_CLIENT_SECRET`, `REDDIT_USER_AGENT`, `TRADEHIVE_CACHE_DIR` |
+| `tradingagents/agents/utils/agent_utils.py` | 导入 9 个新工具（crypto / macro / sentiment tools） |
+| `tradingagents/agents/__init__.py` | 导出 `create_crypto_analyst`, `create_sentiment_analyst`, `create_macro_analyst` |
+| `tradingagents/graph/conditional_logic.py` | 新增 `should_continue_sentiment()`, `should_continue_crypto()`, `should_continue_macro()` |
+| `tradingagents/graph/trading_graph.py` | 新增 `sentiment` / `crypto` / `macro` 三个 ToolNode；导入 9 个新工具 |
+| `tradingagents/graph/setup.py` | `setup_graph()` 增加对 `"sentiment"`, `"crypto"`, `"macro"` 的节点注册与边连接 |
+| `pyproject.toml` | 新增依赖：`fredapi>=0.5.1`, `vaderSentiment>=3.3.2`, `pyarrow>=14.0.0`, `praw>=7.7.0` |
+| `main.py` | 新增注释形式的使用示例（加密货币分析 / 全量分析），原 NVDA 标准流程不变 |
+
+##### selected_analysts 可用值（新旧对比）
+
+```python
+# 原有（保持不变）
+["market", "social", "news", "fundamentals"]
+
+# 新增（3 个）
+["crypto", "sentiment", "macro"]
+
+# 示例组合：加密货币分析
+selected_analysts = ["crypto", "sentiment", "fundamentals"]
+
+# 示例组合：全量分析（含宏观加分项）
+selected_analysts = ["market", "social", "news", "fundamentals", "sentiment", "crypto", "macro"]
+```
+
+##### 依赖安装
+
+```bash
+pip install fredapi vaderSentiment pyarrow praw yfinance
+```
+
+> `yfinance` 为加密货币历史数据的主要来源（BTC-USD / ETH-USD），CoinGecko 仅用于实时快照。
 
 ### 3. RAP 向量库外部数据（需支持回测的历史数据）
 
@@ -77,20 +413,70 @@ RAP 的核心是”按需检索”而非把所有数据塞进 prompt——当 ag
 
 ### 4. 多资产组合设计
 
-（教授建议）的部分
-将 TradingAgents 从单支股票扩展为支持组合管理。
+（教授建议）将 TradingAgents 从单支股票扩展为支持组合管理。
 
+**设计方案（Spec）：**
+
+**核心扩展点：** 当前系统每次 `propagate(ticker, date)` 只分析一支股票，输出"买 / 卖 / 持有"决策。多资产组合扩展后，输出仓位权重向量，如 `{NVDA: 0.4, BTC: 0.3, AAPL: 0.3}`。
+
+**工作流变更：** 外层 for loop 对每支股票分别运行分析师节点 → 汇总各 ticker 报告 → Portfolio Manager 生成权重分配（含相关性、波动率计算）
+
+**约束：** LLM 上下文窗口限制（多报告拼接需摘要压缩）；可用 asyncio 并行各 ticker 减少耗时。
 
 ### 5. 滚动前向验证（Roll-forward Validation）
 
 优化滚动窗口以降低过拟合。
 
+**设计方案（Spec）：**
+
+**目标**：前向验证（Walk-forward Testing）避免未来数据泄漏（Look-ahead Bias）。
+
+**验证流程（步长 = 1月）：**
+
+| 训练窗口 (In-sample) | 验证窗口 (Out-of-sample) |
+|---|---|
+| 2023-01-01 ~ 2023-12-31 | 2024-01-01 ~ 2024-03-31 |
+| 2023-04-01 ~ 2024-03-31 | 2024-04-01 ~ 2024-06-30 |
+| 2023-07-01 ~ 2024-06-30 | 2024-07-01 ~ 2024-09-30 |
+
+**防泄漏控制：** yfinance / CoinGecko 按日期查询天然不泄漏；VADER 用 `lookback_days` 控制窗口；FRED 使用 `realtime_start` 参数；Agent 长期记忆仅在训练期积累，验证期只读不写。
+
 ### 6. 对多 agent 策略结果进行严格的金融回测与评估
+
+**设计方案（Spec）：**
+
+**回测伪代码：**
+
+```python
+def run_backtest(ticker, start_date, end_date, config):
+    date_range = get_trading_days(start_date, end_date)
+    portfolio = {"cash": 100_000, "position": 0, "history": []}
+    for date in date_range:
+        _, decision = ta.propagate(ticker, date)
+        action = parse_decision(decision)  # "buy" / "sell" / "hold"
+        portfolio = execute_trade(portfolio, action, get_price(ticker, date))
+    return compute_metrics(portfolio)
+```
+
+**评估指标：** CAGR = `(final/initial)^(252/n)-1`；夏普比率 = `(CAGR-0.05)/vol`；最大回撤 = `max(1-value/rolling_max)`；波动率 = `std(daily_returns)*sqrt(252)`
+
+**对比基准：** Buy-and-Hold / 单 Agent Bot（无辩论）/ 动量策略（20日均线穿越）
 
 ### 7. 交付脚本数据收集/回测/计算，以及demo演示脚本
 
-- 数据收集、回测与指标计算脚本
-- 小型 demo 脚本（展示如何对指定 ticker 和日期运行 bot）
+**已完成（可直接使用）：Demo 脚本 `main.py`** — 展示如何对 NVDA/2024-05-10 运行完整多 agent 分析
+
+```bash
+cp .env.example .env          # 填写 OPENAI_API_KEY 等
+pip install -e ".[dev]"
+pip install fredapi vaderSentiment pyarrow praw yfinance
+python main.py
+```
+
+**待实现（Spec）：**
+
+- **数据预加载脚本** `scripts/fetch_data.py`：批量拉取 OHLCV/情绪/宏观数据写入 `data_cache/`，支持参数 `--tickers NVDA BTC --start 2024-01-01 --end 2024-12-31`
+- **回测脚本** `scripts/backtest.py`：跨日期调用 `propagate()`，输出 6 项指标，与基准对比
 
 
 ## 我的设计工作

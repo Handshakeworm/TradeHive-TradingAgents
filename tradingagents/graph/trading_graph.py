@@ -30,7 +30,16 @@ from tradingagents.agents.utils.agent_utils import (
     get_income_statement,
     get_news,
     get_insider_transactions,
-    get_global_news
+    get_global_news,
+    # 新增数据源工具
+    get_crypto_price,
+    get_crypto_historical,
+    get_crypto_market_overview,
+    get_macro_indicator,
+    get_macro_snapshot,
+    list_available_macro_series,
+    get_news_sentiment,
+    get_reddit_sentiment,
 )
 
 from .conditional_logic import ConditionalLogic
@@ -187,6 +196,29 @@ class TradingAgentsGraph:
                     get_balance_sheet,
                     get_cashflow,
                     get_income_statement,
+                ]
+            ),
+            # ── 新增数据源 ToolNode ─────────────────────────────────────
+            "sentiment": ToolNode(
+                [
+                    get_news,
+                    get_news_sentiment,
+                    get_reddit_sentiment,
+                ]
+            ),
+            "crypto": ToolNode(
+                [
+                    get_crypto_price,
+                    get_crypto_historical,
+                    get_crypto_market_overview,
+                    get_macro_snapshot,
+                ]
+            ),
+            "macro": ToolNode(
+                [
+                    get_macro_snapshot,
+                    get_macro_indicator,
+                    list_available_macro_series,
                 ]
             ),
         }

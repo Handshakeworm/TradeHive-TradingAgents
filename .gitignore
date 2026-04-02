@@ -220,3 +220,6 @@ __marimo__/
 
 # Personal notes
 新待移交八股.md
+
+# Ignore .env.example file
+.env.example
