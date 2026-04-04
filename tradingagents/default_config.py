@@ -25,7 +25,7 @@ DEFAULT_CONFIG = {
     "data_vendors": {
         "core_stock_apis": "yfinance",       # Options: alpha_vantage, yfinance
         "technical_indicators": "yfinance",  # Options: alpha_vantage, yfinance
-        "fundamental_data": "yfinance",      # Options: alpha_vantage, yfinance
+        "fundamental_data": "fmp",             # Options: fmp, alpha_vantage
         "news_data": "yfinance",             # Options: alpha_vantage, yfinance
         # ── 新增数据类别（均为免费，见下方说明） ──────────────────────────────
         "crypto_data": "coingecko",          # CoinGecko 免费无需 API Key

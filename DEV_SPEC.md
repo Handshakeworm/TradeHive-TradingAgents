@@ -289,12 +289,6 @@ SignalProcessor（提取单词决策标签）→ 输出
 
 **P1 — 高优先级（影响回测正确性）**
 
-1. **yfinance 新闻无历史查询能力**
-   - 现状：`ticker.news` 仅返回当前最近 ~8 篇，不支持按日期范围拉取历史新闻
-   - 影响：回测历史日期时（如 2024-05-10），新闻情绪数据可能为空或返回的是今天的新闻
-   - 后果：情绪分析在历史回测中基本失效，sentiment_report 字段为空，下游辩论缺少情绪输入
-   - 状态：⚠️ **待解决** — 代码已注释说明此限制；严格历史回测需接入 NewsAPI / GNews（有免费层，支持 30 天历史），超出当前任务范围
-
 2. **CoinGecko 免费 API 限速严重**
    - 现状：公共端点无 API Key 时限速约 10-30 req/min，当 crypto analyst 连续调用多个工具时极易触发
    - 影响：工具调用失败或需等待 60 秒，整个 Agent 推理链中断
@@ -304,10 +298,6 @@ SignalProcessor（提取单词决策标签）→ 输出
    - 原状：宏观指标（如 CPI）通常滞后 2-6 周发布，`get_macro_snapshot` 和 `get_macro_indicator` 未区分"发布日"与"数据日"
    - 影响：回测中可能使用了当时尚未公开的数据（未来泄漏），在严格 Walk-forward 验证中违规
    - 状态：✅ **已修复（2026-03-29）** — `fred_macro.py` 所有 `fred.get_series()` 调用均加入 `realtime_start=date, realtime_end=date` 参数，FRED API 自动只返回该日期前已公开发布的数据，消除未来泄漏
-
-4. **social_media_analyst 与 sentiment_analyst 写入同一字段冲突**
-   - 原状：两者都写 `state["sentiment_report"]`，同时选入时后执行的覆盖前者，一份报告被静默丢弃
-   - 状态：✅ **已修复（2026-03-29）** — `social_media_analyst` 改写 `state["community_report"]`（社区舆情脉冲）；`sentiment_analyst` 保持写 `state["sentiment_report"]`（VADER 定量评分）；`AgentState` 新增 `community_report` 字段；8 个下游节点（bull/bear researcher、research_manager、portfolio_manager、trader、3×风险辩手）均增加读取 `community_report` 并条件性拼入 `curr_situation`
 
 5. **crypto_analyst 与 market_analyst 写入同一字段冲突**
    - 原状：两者都写 `state["market_report"]`，同时选中时后者覆盖前者
@@ -355,43 +345,14 @@ RAP 的核心是”按需检索”而非把所有数据塞进 prompt——当 ag
 
 ### 1. Agent 角色设计修改
 
-tools修改以支持回测
 
-`get_news`改alpha vantage
-`get_global_news` 改alpha vantage
-
-`get_insider_transactions`有历史数据
-
- `get_fundamentals`目前两个数据源都不支持历史
-
-以下工具的 API 本身只返回最新数据，无法通过本地处理解决，回测需要替换数据源：
-
-| 工具 | API 限制 | 回测方案 |
-|------|----------|----------|
-
+**sentiment analyst功能改进**
 | `get_reddit_sentiment` | Reddit API 只搜最近一个月帖子 | 实盘可用，回测不可用，无替代 |
+
+**macro analyst改进**
+
+**crypto链设计**
 | `get_crypto_market_overview` | CoinGecko API 只返回当前排行，不接受日期参数 | 实盘可用，回测无替代 |
-
-| `get_fundamentals` (yfinance vendor) | `ticker.info` 只返回当前基本面，无历史接口 | ✅ 已删除 yfinance vendor，统一使用 Alpha Vantage（注：AV OVERVIEW 端点同样为当前快照） |
-
-
-| `get_insider_transactions` (yfinance vendor) | ~~只返回最新交易记录，无历史查询~~ 实测有完整历史交易记录 | 保留Alpha Vantage|
-| `get_balance_sheet/cashflow/income_statement` (yfinance) | 返回多期财报但无日期过滤，回测有数据泄漏风险 | 需加按日期截断逻辑 |
-
-**Alpha Vantage 的 NEWS_SENTIMENT 返回结构也类似，每条包含：**
-
-title
-summary（摘要，非全文）
-source
-overall_sentiment_score / overall_sentiment_label
-ticker_sentiment（每个 ticker 的情绪分）
-
-
-sentiment analyst功能改进
-
-macro analyst改进
-
-crypto链设计
 
 #### Agent 层集成（完整实现记录，2026-03-28）
 

@@ -9,14 +9,15 @@ from .y_finance import (
 from .alpha_vantage import (
     get_stock as get_alpha_vantage_stock,
     get_indicator as get_alpha_vantage_indicator,
-    get_fundamentals as get_alpha_vantage_fundamentals,
     get_balance_sheet as get_alpha_vantage_balance_sheet,
     get_cashflow as get_alpha_vantage_cashflow,
     get_income_statement as get_alpha_vantage_income_statement,
     get_news as get_alpha_vantage_news,
     get_global_news as get_alpha_vantage_global_news,
 )
+from .fmp_fundamentals import get_fundamentals as get_fmp_fundamentals
 from .alpha_vantage_common import AlphaVantageRateLimitError
+from .fmp_common import FMPRateLimitError
 
 # ── 新增数据源 ──────────────────────────────────────────────────────────────
 from .coingecko import (
@@ -93,6 +94,7 @@ TOOLS_CATEGORIES = {
 VENDOR_LIST = [
     "yfinance",
     "alpha_vantage",
+    "fmp",         # Financial Modeling Prep，免费 250 req/day
     "coingecko",   # 加密货币，免费无 API Key
     "fred",        # 宏观经济，免费需申请 API Key
     "vader",       # 情绪分析，纯离线无 API Key
@@ -112,7 +114,7 @@ VENDOR_METHODS = {
     },
     # fundamental_data
     "get_fundamentals": {
-        "alpha_vantage": get_alpha_vantage_fundamentals,
+        "fmp": get_fmp_fundamentals,
     },
     "get_balance_sheet": {
         "alpha_vantage": get_alpha_vantage_balance_sheet,
@@ -203,7 +205,7 @@ def route_to_vendor(method: str, *args, **kwargs):
 
         try:
             return impl_func(*args, **kwargs)
-        except AlphaVantageRateLimitError:
+        except (AlphaVantageRateLimitError, FMPRateLimitError):
             continue  # Only rate limits trigger fallback
 
     raise RuntimeError(f"No available vendor for '{method}'")

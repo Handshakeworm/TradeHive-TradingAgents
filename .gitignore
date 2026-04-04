@@ -217,6 +217,7 @@ __marimo__/
 
 # Cache
 **/data_cache/
+**/fmp_cache/
 
 # Personal notes
 新待移交八股.md

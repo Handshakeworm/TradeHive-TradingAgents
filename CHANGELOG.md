@@ -364,3 +364,86 @@ python main.py
 
 ---
 
+## 版本：v0.6.0 — 引入 FMP 替换 get_fundamentals，支持历史基本面数据
+
+**改动日期**：2026-04-04  
+**改动摘要**：`get_fundamentals` 原先调用 Alpha Vantage OVERVIEW 端点，只返回当前快照，回测时产生数据泄漏。引入 Financial Modeling Prep (FMP) 作为新数据源，每个 ticker 一次请求拉取全部历史季度数据并缓存到本地，回测时按 `curr_date` 过滤返回对应时间点的基本面指标。
+
+---
+
+### 一、新增 FMP 数据源
+
+**新增原因**：Alpha Vantage OVERVIEW 端点无日期参数，始终返回"今天"的 P/E、ROE 等指标。FMP 的 `key-metrics`、`ratios`、`analyst-estimates`、`grade` 端点均返回完整历史季度数据，天然支持回测日期过滤。
+
+**使用的 FMP 端点**：
+
+| 端点 | 返回内容 |
+|------|----------|
+| `GET /api/v3/key-metrics/{symbol}?period=quarter` | 历史 P/E, P/B, EPS, BookValue, ROE, ROA, MarketCap, EV 等估值与盈利指标 |
+| `GET /api/v3/ratios/{symbol}?period=quarter` | 历史 ProfitMargin, OperatingMargin, DebtToEquity, CurrentRatio 等财务比率 |
+| `GET /api/v3/analyst-estimates/{symbol}` | 历史分析师预估（EPS/Revenue estimates） |
+| `GET /api/v3/grade/{symbol}` | 历史评级变更（upgrades/downgrades） |
+| `GET /api/v3/profile/{symbol}` | 公司静态信息（Sector, Industry, Beta） |
+
+**本地缓存策略**：每个 ticker × 每个端点缓存为一个 JSON 文件（如 `AAPL_key-metrics.json`），首次调用后后续回测直接读取本地缓存，不消耗 API 额度。
+
+| 文件 | 操作 |
+|------|------|
+| `tradingagents/dataflows/fmp_common.py` | **新增** — FMP 通用请求层（API Key 管理、请求发送、rate limit 异常处理） |
+| `tradingagents/dataflows/fmp_fundamentals.py` | **新增** — 核心逻辑：5 个端点数据拉取、本地 JSON 缓存、按 `curr_date` 日期过滤、格式化报告输出 |
+
+### 二、派生字段补全
+
+除 FMP 直接提供的字段外，额外计算了 8 个派生字段以完全覆盖原 Alpha Vantage OVERVIEW 的全部信息：
+
+| 字段 | 计算方式 |
+|------|----------|
+| QuarterlyEarningsGrowthYOY | 对比最近季度 vs 去年同季度的 `netIncomePerShare` |
+| QuarterlyRevenueGrowthYOY | 对比最近季度 vs 去年同季度的 `revenuePerShare` |
+| ForwardPE | 从 peRatio 反推价格，除以 `estimatedEpsAvg` |
+| 52WeekHigh / 52WeekLow | 通过 `route_to_vendor("get_stock_data")` 获取 1 年价格历史，取 max/min |
+| 50DayMovingAverage | 最近 50 日收盘价均值 |
+| 200DayMovingAverage | 最近 200 日收盘价均值 |
+
+### 三、移除 Alpha Vantage OVERVIEW
+
+| 文件 | 操作 |
+|------|------|
+| `tradingagents/dataflows/alpha_vantage_fundamentals.py` | 移除 `get_fundamentals()` 函数（OVERVIEW 端点不再使用） |
+| `tradingagents/dataflows/alpha_vantage.py` | 移除 `get_fundamentals` 导出 |
+
+### 四、Vendor 路由更新
+
+| 文件 | 操作 |
+|------|------|
+| `tradingagents/dataflows/interface.py` | `get_fundamentals` vendor 从 `alpha_vantage` 替换为 `fmp`；新增 `fmp` 到 `VENDOR_LIST`；fallback 逻辑新增 `FMPRateLimitError` 处理 |
+| `tradingagents/default_config.py` | `fundamental_data` 默认 vendor 从 `yfinance` 改为 `fmp` |
+
+### 五、配置与环境
+
+| 文件 | 操作 |
+|------|------|
+| `.env.example` | 新增 `FMP_API_KEY` 说明及申请链接 |
+| `.gitignore` | 新增 `**/fmp_cache/` |
+
+### 六、变更后 vendor 映射
+
+| 工具 | 可用 vendor |
+|------|------------|
+| `get_fundamentals` | `fmp`（原 `alpha_vantage` 已移除） |
+| `get_balance_sheet` | `alpha_vantage` |
+| `get_cashflow` | `alpha_vantage` |
+| `get_income_statement` | `alpha_vantage` |
+
+### 七、字段覆盖率
+
+对比原 Alpha Vantage OVERVIEW 的 ~48 个字段：直接覆盖 36 个，可推算 8 个（已实现），仅 4 个无关紧要的元数据字段缺失（FiscalYearEnd、DividendDate、ExDividendDate、AnalystTargetPrice）。**回测核心的估值与盈利指标 100% 覆盖**。
+
+### 八、未受影响
+
+- `fundamentals_analyst.py` 无需修改 — 工具接口 `get_fundamentals(ticker, curr_date)` 完全不变
+- `get_balance_sheet`、`get_cashflow`、`get_income_statement` 仍走 Alpha Vantage，不受影响
+- 下游所有消费 `fundamentals_report` 的节点（researcher、trader、debator）无需改动
+
+---
+
