@@ -216,24 +216,22 @@ def _get_stock_stats_bulk(
             raise Exception("Stockstats fail: Yahoo Finance data not fetched yet!")
     else:
         # Online data fetching with caching
-        today_date = pd.Timestamp.today()
-        curr_date_dt = pd.to_datetime(curr_date)
-
-        end_date = today_date
-        start_date = today_date - pd.DateOffset(years=15)
-        start_date_str = start_date.strftime("%Y-%m-%d")
-        end_date_str = end_date.strftime("%Y-%m-%d")
-
+        # 使用固定文件名避免每天重新下载（回测场景不需要每日更新）
         os.makedirs(config["data_cache_dir"], exist_ok=True)
 
         data_file = os.path.join(
             config["data_cache_dir"],
-            f"{symbol}-YFin-data-{start_date_str}-{end_date_str}.csv",
+            f"{symbol}-YFin-indicators.csv",
         )
 
         if os.path.exists(data_file):
             data = pd.read_csv(data_file, on_bad_lines="skip")
         else:
+            today_date = pd.Timestamp.today()
+            start_date = today_date - pd.DateOffset(years=15)
+            start_date_str = start_date.strftime("%Y-%m-%d")
+            end_date_str = today_date.strftime("%Y-%m-%d")
+
             data = yf_retry(lambda: yf.download(
                 symbol,
                 start=start_date_str,
@@ -291,6 +289,57 @@ def get_stockstats_indicator(
         return ""
 
     return str(indicator_value)
+
+
+def get_vix_data(
+    start_date: Annotated[str, "Start date in yyyy-mm-dd format"],
+    end_date: Annotated[str, "End date in yyyy-mm-dd format"],
+) -> str:
+    """Get VIX (CBOE Volatility Index) daily data for the given date range.
+
+    VIX measures the market's expectation of 30-day S&P 500 volatility.
+    Values above 30 indicate high fear/uncertainty; below 15 indicate complacency.
+    """
+    try:
+        # yfinance end is exclusive, add 1 day to include end_date
+        end_dt = datetime.strptime(end_date, "%Y-%m-%d") + relativedelta(days=1)
+        end_date_exclusive = end_dt.strftime("%Y-%m-%d")
+
+        # Use Ticker.history() instead of yf.download() to avoid shared-state
+        # race conditions when multiple downloads run concurrently in ToolNode threads
+        ticker_obj = yf.Ticker("^VIX")
+        data = yf_retry(lambda: ticker_obj.history(
+            start=start_date,
+            end=end_date_exclusive,
+            auto_adjust=True,
+        ))
+
+        if data is None or data.empty:
+            return f"No VIX data found between {start_date} and {end_date}"
+
+        if data.index.tz is not None:
+            data.index = data.index.tz_localize(None)
+
+        data.index = data.index.strftime("%Y-%m-%d")
+
+        lines = [
+            f"# VIX (CBOE Volatility Index) from {start_date} to {end_date}",
+            "# Interpretation: <15 = Low fear, 15-25 = Normal, 25-30 = Elevated, >30 = High fear/panic",
+            "",
+            "| Date | VIX Close | VIX High | VIX Low |",
+            "|------|-----------|----------|---------|",
+        ]
+
+        for date, row in data.iterrows():
+            close = round(float(row["Close"]), 2)
+            high = round(float(row["High"]), 2)
+            low = round(float(row["Low"]), 2)
+            lines.append(f"| {date} | {close} | {high} | {low} |")
+
+        return "\n".join(lines)
+
+    except Exception as e:
+        return f"Error retrieving VIX data: {str(e)}"
 
 
 def get_fundamentals(
@@ -476,3 +525,55 @@ def get_insider_transactions(
 
     except Exception as e:
         return f"Error retrieving insider transactions for {ticker}: {str(e)}"
+
+
+def get_dxy_data(
+    start_date: Annotated[str, "Start date in yyyy-mm-dd format"],
+    end_date: Annotated[str, "End date in yyyy-mm-dd format"],
+) -> str:
+    """Get US Dollar Index (DXY) daily data for the given date range.
+
+    DXY measures the value of the US dollar relative to a basket of major currencies.
+    DXY > 100 = strong USD (headwind for US multinationals' overseas revenues);
+    DXY < 90 = weak USD (tailwind for export-heavy companies).
+    """
+    try:
+        # yfinance end is exclusive, add 1 day to include end_date
+        end_dt = datetime.strptime(end_date, "%Y-%m-%d") + relativedelta(days=1)
+        end_date_exclusive = end_dt.strftime("%Y-%m-%d")
+
+        # Use Ticker.history() instead of yf.download() to avoid shared-state
+        # race conditions when multiple downloads run concurrently in ToolNode threads
+        ticker_obj = yf.Ticker("DX-Y.NYB")
+        data = yf_retry(lambda: ticker_obj.history(
+            start=start_date,
+            end=end_date_exclusive,
+            auto_adjust=True,
+        ))
+
+        if data is None or data.empty:
+            return f"No DXY data found between {start_date} and {end_date}"
+
+        if data.index.tz is not None:
+            data.index = data.index.tz_localize(None)
+
+        data.index = data.index.strftime("%Y-%m-%d")
+
+        lines = [
+            f"# US Dollar Index (DXY) from {start_date} to {end_date}",
+            "# Interpretation: >100 = Strong USD (headwind for US multinational revenues); <90 = Weak USD (tailwind for exporters)",
+            "",
+            "| Date | DXY Close | DXY High | DXY Low |",
+            "|------|-----------|----------|---------|",
+        ]
+
+        for date, row in data.iterrows():
+            close = round(float(row["Close"]), 3)
+            high = round(float(row["High"]), 3)
+            low = round(float(row["Low"]), 3)
+            lines.append(f"| {date} | {close} | {high} | {low} |")
+
+        return "\n".join(lines)
+
+    except Exception as e:
+        return f"Error retrieving DXY data: {str(e)}"

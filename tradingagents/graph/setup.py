@@ -38,7 +38,7 @@ class GraphSetup:
         self.conditional_logic = conditional_logic
 
     def setup_graph(
-        self, selected_analysts=["market", "sentiment", "news", "fundamentals"]
+        self, selected_analysts=["market", "sentiment", "news", "fundamentals", "macro"]
     ):
         """Set up and compile the agent workflow graph.
 
@@ -85,20 +85,13 @@ class GraphSetup:
             delete_nodes["fundamentals"] = create_msg_delete()
             tool_nodes["fundamentals"] = self.tool_nodes["fundamentals"]
 
-        # ── 新增 Analyst 类型 ────────────────────────────────────────────────
-        if "crypto" in selected_analysts:
-            analyst_nodes["crypto"] = create_crypto_analyst(
-                self.quick_thinking_llm
-            )
-            delete_nodes["crypto"] = create_msg_delete()
-            tool_nodes["crypto"] = self.tool_nodes["crypto"]
-
         if "macro" in selected_analysts:
             analyst_nodes["macro"] = create_macro_analyst(
                 self.quick_thinking_llm
             )
             delete_nodes["macro"] = create_msg_delete()
             tool_nodes["macro"] = self.tool_nodes["macro"]
+
 
         # Create researcher and manager nodes
         bull_researcher_node = create_bull_researcher(

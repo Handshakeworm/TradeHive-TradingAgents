@@ -447,3 +447,451 @@ python main.py
 
 ---
 
+## 版本：v0.7.0 — 批量预拉取缓存（Bulk Prefetch Cache）
+
+**改动日期**：2026-04-04  
+**改动摘要**：将按请求缓存（每次 API 调用单独存一份文件）重构为批量预拉取 + 本地切片策略。首次请求时一次性拉取 5 年完整数据存到本地，后续查询从本地按日期切片返回，零 API 调用。覆盖全部 8 个数据工具，包括新闻数据。
+
+---
+
+### 一、新增批量缓存模块
+
+**新增原因**：原有按请求缓存策略下，同一 ticker 的不同日期范围各存一份文件，重复调用 API 且缓存命中率低。回测场景中同一 ticker 会被反复查询不同日期窗口，需要一次性拉取全量数据。
+
+| 文件 | 操作 |
+|------|------|
+| `tradingagents/dataflows/bulk_cache.py` | **新增** — 批量缓存核心模块，提供 `bulk_has`/`bulk_load`/`bulk_save`（支持 `.csv`/`.txt` 扩展名）、`strip_comment_header`、`slice_csv_by_range`、`slice_csv_before`、`slice_json_news`、`bulk_clear` |
+
+**目录结构**：
+```
+data_cache/bulk/
+  AAPL/
+    stock_data.csv          # 5 年日线 OHLCV
+    stock_data.meta.json    # 记录拉取范围
+    indicator_rsi.csv       # 技术指标
+    balance_sheet_quarterly.csv
+    news.txt                # JSON 格式新闻
+    news.meta.json
+  _GLOBAL/
+    global_news.txt
+```
+
+### 二、数据路由重构
+
+**改动原因**：`route_to_vendor()` 需新增批量缓存层，优先级为：批量缓存 → 按请求缓存（降级） → 调用 vendor API。
+
+| 文件 | 操作 |
+|------|------|
+| `tradingagents/dataflows/interface.py` | 新增 `BULK_CACHE_METHODS` 集合（8 个方法）；新增 `_prefetch_range()`、`_try_bulk_cache()` 调度器；新增 8 个批量处理函数（`_bulk_stock_data`、`_bulk_indicators`、`_bulk_balance_sheet`、`_bulk_cashflow`、`_bulk_income_statement`、`_bulk_insider_transactions`、`_bulk_news`、`_bulk_global_news`）；新增 `_is_valid_news_response()` 验证函数 |
+
+### 三、新闻缓存特殊处理
+
+**设计决策**：新闻缓存以牺牲服务器端相关性排序（`sort=RELEVANCE`）为代价，预拉取时改用 `sort=LATEST, limit=1000`。后续查询从本地按 `time_published` 时间戳切片。
+
+- 空切片（缓存不覆盖请求日期范围）自动降级到直接 API 调用
+- API 错误响应不会被错误缓存（`_is_valid_news_response()` 验证）
+- 全局新闻预拉取限制 30 天范围（AV API 不支持过大日期跨度）
+
+| 文件 | 操作 |
+|------|------|
+| `tradingagents/dataflows/alpha_vantage_news.py` | `get_news()`、`get_global_news()` 新增 `sort` 参数（默认 `RELEVANCE`） |
+
+### 四、配置变更
+
+| 文件 | 操作 |
+|------|------|
+| `tradingagents/default_config.py` | 新增 `bulk_cache_enabled: True`、`bulk_cache_prefetch_years: 5`；移除重复的 `data_cache_dir` 定义 |
+| `tradingagents/dataflows/local_cache.py` | `list_cache()` glob 模式从 `*.txt` 改为 `*`（跳过 `.meta.json`）；`get_cache_summary()` 分别报告 bulk 与 per-request 统计 |
+
+### 五、运行时修复
+
+| 文件 | 问题 | 修复 |
+|------|------|------|
+| `tradingagents/agents/utils/agent_states.py` | `sentiment_report` 字段缺少缩进导致 `IndentationError` | 补全 4 空格缩进 |
+| `tradingagents/graph/trading_graph.py` | Windows GBK 终端无法显示 LLM 输出中的 emoji | `pretty_print()` 外加 `UnicodeEncodeError` 捕获，降级为 ASCII 输出 |
+
+### 六、批量缓存方法清单
+
+| 方法 | 预拉取策略 | 切片方式 |
+|------|-----------|----------|
+| `get_stock_data` | 5 年日线 | `slice_csv_by_range(start, end)` |
+| `get_indicators` | 5 年指标 | `slice_csv_by_range(curr_date - lookback, curr_date)` |
+| `get_balance_sheet` | 全量（不传 curr_date） | `slice_csv_before(curr_date)` |
+| `get_cashflow` | 全量 | `slice_csv_before(curr_date)` |
+| `get_income_statement` | 全量 | `slice_csv_before(curr_date)` |
+| `get_insider_transactions` | 全量 | `slice_csv_before(curr_date)` |
+| `get_news` | `limit=1000, sort=LATEST` | `slice_json_news(start, end, limit=30)` |
+| `get_global_news` | 最近 30 天, `limit=1000` | `slice_json_news(start, end, limit)` |
+
+---
+
+## 版本：v0.8.0 — 用 Alpha Vantage 替换 FMP 实现 get_fundamentals
+
+**改动日期**：2026-04-05  
+**改动摘要**：FMP 免费版不支持 `key-metrics` 端点（返回 403 Forbidden），导致 `get_fundamentals` 完全不可用。改用 Alpha Vantage 的 BALANCE_SHEET、INCOME_STATEMENT、CASH_FLOW、EARNINGS 端点，结合股价数据推算全部估值/盈利/偿债指标。移除不支持回测的功能（公司简介、分析师评级等）。
+
+---
+
+### 一、新增 Alpha Vantage 综合基本面模块
+
+**新增原因**：FMP 免费版（Free Plan）不支持 `key-metrics` 和 `ratios` 端点（需 Starter Plan $22/月），而用户已开通 Alpha Vantage 会员。AV 的四个财报端点提供完整历史季度数据，可推算出 FMP 版报告中的绝大部分指标。
+
+**使用的 AV 端点**：
+
+| 端点 | 返回内容 | 缓存格式 |
+|------|----------|----------|
+| `BALANCE_SHEET` | 历史季度资产负债表（totalAssets, totalEquity, shares, debt 等） | JSON |
+| `INCOME_STATEMENT` | 历史季度利润表（revenue, netIncome, grossProfit, ebitda 等） | JSON |
+| `CASH_FLOW` | 历史季度现金流量表（operatingCashflow, capitalExpenditures 等） | JSON |
+| `EARNINGS` | 历史季度 EPS（reportedEPS, estimatedEPS, surprise, surprisePercentage） | JSON |
+
+**缓存策略**：采用 FMP 同款 `_fetch_and_cache` 模式，每个 ticker × 每个端点一份 JSON 文件（如 `data_cache/bulk/AAPL/balance_sheet.json`），首次调用后永久缓存。
+
+| 文件 | 操作 |
+|------|------|
+| `tradingagents/dataflows/alpha_vantage_fundamentals_full.py` | **新增** — 核心实现：JSON 缓存、按 curr_date 日期过滤、指标计算、格式化报告 |
+
+### 二、计算指标覆盖
+
+从 AV 财报数据 + 股价推算的指标：
+
+| 分区 | 指标 | 计算公式 |
+|------|------|----------|
+| **Valuation** | Market Cap | 股价 × commonStockSharesOutstanding |
+| | P/E (TTM) | 股价 / (TTM netIncome / shares) |
+| | P/B | 股价 / (totalShareholderEquity / shares) |
+| | P/S | MarketCap / TTM totalRevenue |
+| | EV/EBITDA | (MCap + debt − cash) / TTM ebitda |
+| | P/FCF | MCap / TTM (operatingCashflow − capex) |
+| **Per-Share** | EPS, Revenue/Share, Book Value/Share, FCF/Share | 对应项 / shares |
+| **Profitability** | Gross/Operating/Net Margin | 对应项 / totalRevenue |
+| | ROE | TTM netIncome / totalShareholderEquity |
+| | ROA | TTM netIncome / totalAssets |
+| **Financial Health** | Debt/Equity, Current Ratio, Quick Ratio, Interest Coverage, Cash/Share | 标准公式 |
+| **Growth** | Earnings/Revenue Growth YOY | 本季 vs 去年同季 |
+| **Market Data** | 52W High/Low, 50/200 DMA | 从 stock_data 计算 |
+| **Earnings** | Reported/Estimated EPS, Surprise | 来自 EARNINGS 端点 |
+
+### 三、移除的功能
+
+以下 FMP 版功能因不支持回测或无 AV 等价端点而移除：
+
+| 移除项 | 原因 |
+|--------|------|
+| Company Profile（名称、行业、描述） | 来自 OVERVIEW 端点，不支持回测 |
+| Beta | 来自 OVERVIEW，不支持回测 |
+| Analyst Ratings / Grades | FMP `grade` 端点无 AV 等价 |
+| Forward P/E、PEG | 需前瞻性 analyst estimates，AV EARNINGS 仅有历史 EPS |
+| Dividends（Yield, Payout Ratio） | 无可靠历史数据源 |
+
+### 四、防数据泄漏
+
+- **EARNINGS 端点**：按 `reportedDate`（实际披露日期）过滤，严格防止泄漏
+- **财报端点**：按 `fiscalDateEnding` 过滤（AV 不提供 reportedDate）
+- **股价数据**：通过已有 bulk cache 获取，按 curr_date 切片
+
+### 五、Vendor 路由更新
+
+| 文件 | 操作 |
+|------|------|
+| `tradingagents/dataflows/interface.py` | `get_fundamentals` vendor 从 `fmp` 替换为 `alpha_vantage`；移除 `fmp_fundamentals` import |
+| `tradingagents/default_config.py` | `fundamental_data` 默认 vendor 从 `fmp` 改为 `alpha_vantage` |
+| `main.py` | vendor 配置同步更新 |
+
+### 六、变更后 vendor 映射
+
+| 工具 | 可用 vendor |
+|------|------------|
+| `get_fundamentals` | `alpha_vantage`（原 `fmp` 已移除） |
+| `get_balance_sheet` | `alpha_vantage` |
+| `get_cashflow` | `alpha_vantage` |
+| `get_income_statement` | `alpha_vantage` |
+
+### 七、未受影响
+
+- `fundamental_data_tools.py` — 工具接口 `get_fundamentals(ticker, curr_date)` 完全不变
+- `fundamentals_analyst.py` — Agent prompt 与工具绑定不变
+- `fmp_fundamentals.py` / `fmp_common.py` — 保留文件不删，仅不再注册为 vendor
+- 下游所有消费 `fundamentals_report` 的节点（researcher、trader、debator）无需改动
+
+---
+
+## 版本：v0.9.0 — 统一 Alpha Vantage 数据源 + 修复指标缓存
+
+**改动日期**：2026-04-05  
+**改动摘要**：将 `core_stock_apis` 和 `technical_indicators` 从 yfinance 切换到 Alpha Vantage，消除冗余数据拉取；修复指标批量缓存存���格式错误导致切片失败的问题；修复 `TIME_SERIES_DAILY_ADJUSTED` 和 `MACD` 两个 premium 端点问题
+
+---
+
+### 一、统一数据源到 Alpha Vantage
+
+**改动原因**：yfinance 和 Alpha Vantage 同时作为股价/指标数据源，导致同一 ticker 缓存两份数据（`NVDA-YFin-indicators.csv` 和 `stock_data.csv`）。统一使用 Alpha Vantage 减少 API 调用和存储浪费。
+
+| 文件 | 操作 |
+|------|------|
+| `tradingagents/default_config.py` | `core_stock_apis`: `yfinance` �� `alpha_vantage`；`technical_indicators`: `yfinance` → `alpha_vantage` |
+| `main.py` | ��步更新 vendor 配置 |
+
+### 二���修复 Premium 端点问题
+
+#### 2.1 `TIME_SERIES_DAILY_ADJUSTED` → `TIME_SERIES_DAILY`
+
+**问题**：`TIME_SERIES_DAILY_ADJUSTED` 为 AV 高级端点，用户订阅等级不支持。  
+**修复**：改用功能等价的 `TIME_SERIES_DAILY`（��含 adjusted close 和 split/dividend 列，回测���景不需要）。
+
+| 文件 | 操作 |
+|------|------|
+| `tradingagents/dataflows/alpha_vantage_stock.py` | `_make_api_request("TIME_SERIES_DAILY_ADJUSTED", ...)` → `_make_api_request("TIME_SERIES_DAILY", ...)` |
+
+#### 2.2 `MACD` → `MACDEXT`
+
+**问题**��`MACD` 技术指标端点为 AV 高级端��，始终返回 premium error。  
+**修复**：改用 `MACDEXT`（Extended MACD），返回完全相同的列（`MACD`, `MACD_Signal`, `MACD_Hist`），���在用户订阅等级下可用。
+
+| 文件 | 操作 |
+|------|------|
+| `tradingagents/dataflows/alpha_vantage_indicator.py` | 三处 `_make_api_request("MACD", ...)` �� `_make_api_request("MACDEXT", ...)` |
+| `tradingagents/dataflows/interface.py` | `_INDICATOR_MAP` 中 macd/macds/macdh 的 `av_func` �� `"MACD"` → `"MACDEXT"` |
+
+### 三、修复指标批量缓存
+
+**问题**：`_bulk_indicators` 调用 `get_indicator()` 获取数据，但该函数返回的是已格式化的 `date: value` 文本（含描述信息），存为 `.csv` 后 `slice_csv_by_range()` ��法解析，导致所��指标缓存切片返回空数据。
+
+**修复**：重写 `_bulk_indicators`，绕过 `get_indicator()` 的格式化逻辑，直接调用 `_make_api_request()` 获取 AV 原始 CSV 数据存入缓存。切片后再转换为 `date: value` 格式输出。
+
+**新增特性**：
+- MACD 三指标（macd, macds, macdh）共享同一缓存文件 `indicator_raw_macd.csv`
+- Bollinger Bands 三��标（boll, boll_ub, boll_lb）共享同一缓存文件 `indicator_raw_bbands.csv`
+- 每个指标组仅需一次 API 调用，6 个指标组覆盖全部 11 个指标���VWMA 除外，AV 不���持）
+- 存入前校验响应包含 `time` 列头，防止错误响应被缓存
+
+| 文件 | 操作 |
+|------|------|
+| `tradingagents/dataflows/interface.py` | 重写 `_bulk_indicators()`：新增 `_INDICATOR_MAP`（指标→AV API 映射）和 `_INDICATOR_DESCRIPTIONS`；改为直接调 `_make_api_request()` 获取原始 CSV |
+
+### 四、缓存文件结构变更
+
+旧结构（已废弃）：
+```
+data_cache/bulk/NVDA/
+  indicator_close_50_sma.csv    # 格式化文本，无法切片
+  indicator_macd.csv            # 错误响应
+```
+
+新���构：
+```
+data_cache/bulk/NVDA/
+  indicator_raw_sma_50.csv      # 原始 CSV (time,SMA)
+  indicator_raw_sma_200.csv     # 原始 CSV (time,SMA)
+  indicator_raw_ema_10.csv      # 原始 CSV (time,EMA)
+  indicator_raw_macd.csv        # 原始 CSV (time,MACD,MACD_Hist,MACD_Signal)
+  indicator_raw_rsi.csv         # 原始 CSV (time,RSI)
+  indicator_raw_bbands.csv      # 原始 CSV (time,Real Lower Band,Real Middle Band,Real Upper Band)
+  indicator_raw_atr.csv         # 原始 CSV (time,ATR)
+```
+
+### 五、清理旧缓存
+
+删除所有旧格式 `indicator_*.csv` 缓存文件及对应 `.meta.json`，由新逻辑��新拉取原始 CSV。yfinance 产生的冗余缓存文件（`NVDA-YFin-indicators.csv` 等）一并清理。
+
+### 六、EPS Surprise 显示修复
+
+**问题**：`alpha_vantage_fundamentals_full.py` 中 EPS Surprise % ���用 `_fmt(value, 'pct')` 格式化（×100），但 AV `surprisePercentage` 已是百分比值，导致显示值放大 100 ��（如 11.93% ��示为 1193.06%）。  
+**修复**：改用 `_fmt(value, 'ratio')` 格式化（不×100）。
+
+| ��件 | 操作 |
+|------|------|
+| `tradingagents/dataflows/alpha_vantage_fundamentals_full.py` | `_fmt(m.get('eps_surprise_pct'), 'pct')` → `_fmt(m.get('eps_surprise_pct'), 'ratio')` |
+
+---
+
+## 版本：v0.10.0 — 完善 Bulk Cache 体系 + 移除 FMP + 数据完整性校验
+
+**改动日期**：2026-04-05  
+**改动摘要**：修复财报 JSON→CSV 转换、insider 切换到 AV、分段新闻拉取覆盖 5 年、移除 FMP 数据源、统一 bulk cache 路由（取消按请求缓存降级）、加固存储前校验、修复 fundamentals 空 ticker bug
+
+---
+
+### 一、修复财报 Bulk Cache（JSON 存为 CSV）
+
+**问题**：AV 的 `BALANCE_SHEET`/`INCOME_STATEMENT`/`CASH_FLOW` 端点返回 JSON，但 `_bulk_balance_sheet` 等函数直接存为 `.csv`，`slice_csv_before()` 无法解析 JSON 格式数据，静默返回全部数据——**回测数据泄漏**。
+
+**修复**：在 `alpha_vantage_fundamentals.py` 中新增 `_json_fundamentals_to_csv(raw, freq)` 函数，将 JSON 的 `quarterlyReports`/`annualReports` 数组转为 CSV，确保 `fiscalDateEnding` 为第一列。三个 `get_*` 函数在 `_make_api_request` 之后插入此转换。
+
+| 文件 | 操作 |
+|------|------|
+| `tradingagents/dataflows/alpha_vantage_fundamentals.py` | 新增 `_json_fundamentals_to_csv()`；修改 `get_balance_sheet()`、`get_cashflow()`、`get_income_statement()` |
+
+### 二、Insider Transactions 切换到 Alpha Vantage
+
+**问题**：yfinance 只返回最近 20 条 insider 交易（约 2 个月），无法支持回测。
+
+**修复**：重写 `_bulk_insider_transactions()`，直接调用 AV `INSIDER_TRANSACTIONS` API，解析 JSON 转 CSV 存储。AV 返回 6000+ 条记录（覆盖 20+ 年）。查询时限制返回最近 50 条，防止撑爆 LLM 上下文。
+
+| 文件 | 操作 |
+|------|------|
+| `tradingagents/dataflows/interface.py` | 重写 `_bulk_insider_transactions()`；新增 `alpha_vantage` vendor 条目；返回限制 50 条 |
+
+### 三、分段新闻拉取覆盖 5 年
+
+**问题**：单次 `limit=1000` 请求，热门股票 10 天内即超 1000 篇上限，实际只覆盖约 10 天。
+
+**修复**：
+- 新增 `_generate_date_segments()` 和 `_segmented_news_fetch()` 工具函数
+- Ticker 新闻：5 天一段（365 段），合并去重（按 URL）
+- 全局新闻：15 天一段（约 122 段）
+- 每段间隔 1 秒（用户有 AV Premium 75 req/min）
+
+| 文件 | 操作 |
+|------|------|
+| `tradingagents/dataflows/interface.py` | 新增 `_generate_date_segments()`、`_segmented_news_fetch()`；重写 `_bulk_news()`、`_bulk_global_news()` |
+
+### 四、移除 FMP 数据源
+
+**原因**：`get_fundamentals` 已有完整的 AV 实现（`alpha_vantage_fundamentals_full.py`），FMP 代码不再需要。
+
+| 文件 | 操作 |
+|------|------|
+| `tradingagents/dataflows/fmp_common.py` | **删除** |
+| `tradingagents/dataflows/fmp_fundamentals.py` | **删除** |
+| `tradingagents/dataflows/interface.py` | 移除 `FMPRateLimitError` 导入和引用；移除 `"fmp"` vendor 条目 |
+
+### 五、统一 Bulk Cache 路由，取消降级
+
+**问题**：`BULK_CACHE_METHODS` 中的方法在 bulk cache 返回 `None` 时，会降级到按请求缓存（`load_cache`/`save_cache`），产生多余的 `get_fundamentals/`、`get_indicators/`、`get_stock_data/` 目录。
+
+**修复**：
+- `route_to_vendor` 中 bulk cache 方法不再降级，返回 `None` 即表示数据不可用
+- `get_fundamentals` 加入 `BULK_CACHE_METHODS`，新增 `_bulk_fundamentals()` 直接透传到 vendor（内部从 `bulk/{TICKER}/*.json` 读取）
+- 所有数据统一走 `data_cache/bulk/` 目录，不再产生按请求缓存文件
+
+| 文件 | 操作 |
+|------|------|
+| `tradingagents/dataflows/interface.py` | `route_to_vendor` 取消降级逻辑；`BULK_CACHE_METHODS` 新增 `get_fundamentals`；新增 `_bulk_fundamentals()` |
+
+### 六、加固存储前校验
+
+**问题**：API 返回错误响应（JSON 错误信息）被当作有效数据存入 bulk cache，导致缓存被污染。
+
+**修复**：在 `bulk_save` 之前检查关键列头：
+- `_bulk_stock_data`：检查 `timestamp` 列
+- `_bulk_balance_sheet`/`_bulk_cashflow`/`_bulk_income_statement`：检查 `fiscalDateEnding` 列
+- 校验失败时返回 `None`，不存入缓存
+
+| 文件 | 操作 |
+|------|------|
+| `tradingagents/dataflows/interface.py` | 4 个 `_bulk_*` 函数新增列头校验 |
+
+### 七、修复 Fundamentals 空 Ticker Bug
+
+**问题**：`_compute_price_derived()` 用 `bs.get("symbol", "")` 获取 ticker，当 `bs` 为空 dict 时传入空字符串，导致 AV 返回 "Invalid API call" 错误，影响估值指标计算。
+
+**修复**：`_compute_metrics` 新增 `ticker` 参数，`_compute_price_derived` 优先使用传入的 ticker。
+
+| 文件 | 操作 |
+|------|------|
+| `tradingagents/dataflows/alpha_vantage_fundamentals_full.py` | `_compute_metrics` 新增 `ticker` 参数；`_compute_price_derived` 改用 `ticker or bs.get("symbol", "")` |
+
+### 八、新增缓存验证脚本
+
+新增 `verify_cache.py`，遍历 `data_cache/bulk/` 下所有文件，按类型执行完整性检查（CSV 列头、JSON 结构、行数、日期范围），输出 PASS/FAIL/WARN 报告。
+
+### 九、已缓存 Ticker
+
+| Ticker | 新闻数 | Insider 数 | 分段截断 |
+|--------|--------|-----------|---------|
+| NVDA | 17,677 | 6,891 | 2 段 |
+| AAPL | 8,192 | 7,096 | 0 段 |
+| MSFT | 15,071 | 1,234 | 1 段 |
+| META | 4,289 | 22,430 | 0 段 |
+| GOOGL | 10,144 | 13,919 | 0 段 |
+
+---
+
+## 版本：v0.10.1 — 辩论阶段报告重复注入优化
+
+**改动日期**：2026-04-06  
+**改动摘要**：Bull/Bear 辩手和风险辩论三方每轮调用都从 state 重新取四份完整报告拼入 prompt，报告内容不变却随轮次线性重复。改为仅在第一轮（`count == 0`）注入完整报告，后续轮次只注入 `history`，减少冗余 token。
+
+---
+
+### 改动内容
+
+**改动原因**：`history` 字段本身已累积所有历史发言，后续轮次重复注入四份完整报告（市场/情绪/新闻/基本面）纯属冗余。默认 1 轮配置下影响有限，辩论轮数增大时收益显著。
+
+| 文件 | 改动 |
+|------|------|
+| `tradingagents/agents/researchers/bull_researcher.py` | `count == 0` 时注入完整四份报告，后续轮次只注入 `past_memory_str` |
+| `tradingagents/agents/researchers/bear_researcher.py` | 同上 |
+| `tradingagents/agents/risk_mgmt/aggressive_debator.py` | `count == 0` 时注入完整四份报告，后续轮次跳过（`trader_decision` 每轮保留） |
+| `tradingagents/agents/risk_mgmt/conservative_debator.py` | 同上 |
+| `tradingagents/agents/risk_mgmt/neutral_debator.py` | 同上 |
+
+**注**：风险辩论的 `trader_decision` 每轮保留注入，因其是辩论的核心依据且内容较短。
+
+---
+
+## 版本：v0.11.0 — Sentiment Analyst 增强 + Macro Analyst 新增
+
+**改动日期**：2026-04-06  
+**改动摘要**：为 Sentiment Analyst 新增量化情绪工具（AV 新闻情绪汇总 + VIX）；新增 Macro Analyst Agent，接入 7 个宏观指标数据工具；修复 yfinance 并发下载数据交叉 Bug。
+
+---
+
+### 一、Sentiment Analyst 增强
+
+**问题**：原 Sentiment Analyst 只能通过 `get_news` 读取原始新闻标题，无量化情绪数据，LLM 需自行解读。
+
+**新增内容**：
+- 新增 `get_sentiment_summary` 工具：解析 bulk cache 中 AV NEWS_SENTIMENT 数据，按日汇总情绪评分（均值、Bullish/Neutral/Bearish 计数），输出 Markdown 表格
+- 新增 `get_vix` 工具：通过 yfinance 获取 VIX 历史日数据，反映市场恐惧/贪婪情绪
+- 将新闻条数上限从 30 提升至 100
+- 更新 Sentiment Analyst prompt，明确三步工作流：先调 `get_sentiment_summary` 量化评分 → `get_vix` 市场情绪 → `get_news` 原文细节
+
+| 文件 | 操作 |
+|------|------|
+| `tradingagents/dataflows/sentiment_utils.py` | 新增 `get_sentiment_summary()` |
+| `tradingagents/agents/utils/sentiment_tools.py` | 新建，封装 `get_sentiment_summary` 和 `get_vix` 两个 `@tool` |
+| `tradingagents/dataflows/y_finance.py` | 新增 `get_vix_data()` |
+| `tradingagents/agents/analysts/sentiment_analyst.py` | 更新 tools 列表和 prompt |
+| `tradingagents/dataflows/interface.py` | 新闻切片 `limit` 从 30 改为 100 |
+
+---
+
+### 二、Macro Analyst 新增
+
+**问题**：原系统缺少宏观视角，无法分析利率、通胀、GDP 等宏观环境对目标股票的影响。
+
+**新增内容**：
+- 新增 **Macro Analyst Agent**，常驻于分析师序列（无需手动选中）
+- 接入 7 个数据工具：联邦基金利率、CPI、实际 GDP、失业率、10 年期国债收益率（Alpha Vantage Premium）+ 美元指数 DXY、VIX（yfinance）
+- Prompt 明确分析框架：货币政策 → 通胀 → 经济增长 → 就业 → 市场情绪 → 汇率，最终输出 Tailwind/Neutral/Headwind 判断及汇总表
+- 新增 `macro_report` 字段到 `AgentState`
+
+| 文件 | 操作 |
+|------|------|
+| `tradingagents/dataflows/alpha_vantage_macro.py` | 新建，实现 5 个 AV 宏观端点函数 |
+| `tradingagents/dataflows/y_finance.py` | 新增 `get_dxy_data()` |
+| `tradingagents/agents/utils/macro_tools.py` | 新建，封装 6 个宏观 `@tool`（含 local_cache） |
+| `tradingagents/agents/utils/agent_states.py` | 新增 `macro_report` 字段 |
+| `tradingagents/agents/analysts/macro_analyst.py` | 新建 Macro Analyst Agent |
+| `tradingagents/agents/__init__.py` | 导出 `create_macro_analyst` |
+| `tradingagents/graph/conditional_logic.py` | 新增 `should_continue_macro()` |
+| `tradingagents/graph/trading_graph.py` | 新增 macro 工具导入和 ToolNode；默认 `selected_analysts` 包含 macro |
+| `tradingagents/graph/setup.py` | 新增 macro 分支 |
+| `tradingagents/graph/propagation.py` | 初始化 `macro_report: ""` |
+
+---
+
+### 三、修复 yfinance 并发下载数据交叉 Bug
+
+**问题**：`get_vix_data` 和 `get_dxy_data` 均使用 `yf.download()`。LangGraph ToolNode 在同一批次中并发执行多个工具时，`yf.download()` 的内部共享状态（session/响应缓冲）导致两个函数的返回值互相交叉——DXY 返回 VIX 数据，VIX 返回 DXY 数据，且每次运行必现。
+
+**修复**：将两个函数的下载方式从 `yf.download(ticker, ...)` 改为 `yf.Ticker(ticker).history(...)`。`Ticker` 对象独立实例化，不共享内部状态，并发安全。
+
+| 文件 | 操作 |
+|------|------|
+| `tradingagents/dataflows/y_finance.py` | `get_vix_data` 和 `get_dxy_data` 改用 `yf.Ticker.history()` |
+
+---
+

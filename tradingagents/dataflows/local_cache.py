@@ -1,140 +1,155 @@
 """
 轻量级本地数据缓存模块
-策略：Parquet 文件存储（零依赖数据库，pandas 原生支持，压缩比高）
+策略：纯文本文件存储（所有 tool 返回值均为 str）
 目录结构：
   data_cache/
-    crypto/BTC/2024-01-01_2024-12-31.parquet
-    macro/FEDFUNDS/2020-01-01_2024-12-31.parquet
-    sentiment/NVDA/2024-05-10_2024-05-10.parquet
-    stocks/NVDA/2024-01-01_2024-12-31.parquet
+    get_stock_data/NVDA__2024-01-01__2024-05-10.txt
+    get_indicators/NVDA__rsi__2024-05-10__30.txt
+    get_fundamentals/NVDA__2024-05-10.txt
 
-职责说明（#2 与 #3 的分工边界）：
-  - #2（本模块）：负责写入缓存（save_dataframe）
-  - #3（RAP 向量库）：负责读取缓存（load_dataframe）并向量化，不重复实现采集逻辑
-
-历史数据是否必要？
-  - 回测需要：必须。Agent 需要历史数据才能在过去日期做决策模拟。
-  - 缓存价值：避免每次回测重复调用 API（CoinGecko 有 rate limit，FRED 有配额）。
-  - 缓存机制：首次调用自动写入，后续命中缓存直接返回，显著提速。
+集成点：route_to_vendor() 调用前查缓存，未命中则调 API 后写入。
+回测场景下同参数结果不变，缓存命中后零 API 调用。
 """
 
-import os
 import hashlib
-import pandas as pd
+import re
 from pathlib import Path
-from datetime import datetime
 
-# 缓存根目录，默认放在项目根下的 data_cache/ 文件夹
-_CACHE_ROOT = Path(os.getenv("TRADEHIVE_CACHE_DIR", "data_cache"))
+from .config import get_config
 
-
-def _cache_path(symbol: str, category: str, start: str, end: str) -> Path:
-    """生成缓存文件路径：data_cache/{category}/{symbol}/{start}_{end}.parquet"""
-    safe_symbol = symbol.upper().replace("/", "-").replace(":", "-")
-    cache_dir = _CACHE_ROOT / category / safe_symbol
-    cache_dir.mkdir(parents=True, exist_ok=True)
-    filename = f"{start}_{end}.parquet"
-    return cache_dir / filename
+_MAX_FILENAME_LEN = 200
 
 
-def save_dataframe(
-    df: pd.DataFrame,
-    symbol: str,
-    category: str,
-    start: str,
-    end: str,
-) -> Path:
+def _sanitize(value: str) -> str:
+    """将参数值转为安全的文件名片段：大写、替换特殊字符。"""
+    s = str(value).upper().strip()
+    s = re.sub(r'[\\/:*?"<>|\s]+', "-", s)  # 替换文件系统不安全字符
+    s = s.strip("-")
+    return s or "_EMPTY_"
+
+
+def _cache_path(method: str, args: tuple, kwargs: dict) -> Path | None:
     """
-    将 DataFrame 存储为 parquet 格式。
-    - 自动创建目录，不存在时创建
-    - 同名文件直接覆盖（最新数据优先）
-    - 返回实际写入路径
+    生成缓存文件路径。
+    返回 None 表示缓存被禁用。
+    路径格式：{cache_dir}/{method}/{arg1}__{arg2}__{...}.txt
+    文件名过长时回退到 hash。
     """
-    path = _cache_path(symbol, category, start, end)
-    df.to_parquet(path, index=False, compression="snappy")
-    return path
+    config = get_config()
+    if not config.get("data_cache_enabled", True):
+        return None
+
+    cache_dir = Path(config.get("data_cache_dir", "./data_cache"))
+
+    # 拼接所有参数作为文件名
+    parts = [_sanitize(a) for a in args]
+    for k in sorted(kwargs.keys()):
+        parts.append(_sanitize(kwargs[k]))
+
+    filename = "__".join(parts) if parts else "_NO_ARGS_"
+
+    if len(filename) > _MAX_FILENAME_LEN:
+        # 回退到 hash，但保留前 40 字符供人类识别
+        h = hashlib.sha256(filename.encode()).hexdigest()[:16]
+        filename = f"{filename[:40]}__{h}"
+
+    method_dir = cache_dir / method
+    method_dir.mkdir(parents=True, exist_ok=True)
+    return method_dir / f"{filename}.txt"
 
 
-def load_dataframe(
-    symbol: str,
-    category: str,
-    start: str,
-    end: str,
-) -> pd.DataFrame | None:
+def load_cache(method: str, args: tuple, kwargs: dict) -> str | None:
     """
-    从 parquet 缓存加载 DataFrame。
-    - 命中缓存返回 DataFrame
-    - 未命中返回 None（调用方决定是否回落到 API 采集）
-    #3 RAP 向量库直接调用此函数读取历史数据，无需重复实现采集逻辑。
+    从缓存加载结果。
+    命中返回 str，未命中返回 None。
     """
-    path = _cache_path(symbol, category, start, end)
-    if path.exists():
-        return pd.read_parquet(path)
+    path = _cache_path(method, args, kwargs)
+    if path and path.exists():
+        return path.read_text(encoding="utf-8")
     return None
 
 
-def list_cache(category: str = None) -> list[dict]:
+def save_cache(method: str, args: tuple, kwargs: dict, result: str) -> Path | None:
     """
-    列出缓存中的所有文件，便于调试和管理。
-    返回: [{"category": str, "symbol": str, "start": str, "end": str, "size_kb": float}]
+    将 API 返回的 str 结果写入缓存。
+    返回写入路径，缓存禁用时返回 None。
     """
-    root = _CACHE_ROOT if not category else _CACHE_ROOT / category
+    path = _cache_path(method, args, kwargs)
+    if path:
+        path.write_text(result, encoding="utf-8")
+        return path
+    return None
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 管理工具
+# ─────────────────────────────────────────────────────────────────────────────
+
+def list_cache(method: str = None) -> list[dict]:
+    """
+    列出缓存中的所有文件（含按���求缓存和批量缓存），便于调试和管理。
+    返回: [{"method": str, "filename": str, "size_kb": float, "path": str}]
+    """
+    config = get_config()
+    cache_dir = Path(config.get("data_cache_dir", "./data_cache"))
+    root = cache_dir / method if method else cache_dir
     if not root.exists():
         return []
 
     entries = []
-    for f in root.rglob("*.parquet"):
-        parts = f.relative_to(_CACHE_ROOT).parts
-        if len(parts) >= 3:
-            cat = parts[0]
-            sym = parts[1]
-            stem = f.stem  # "2024-01-01_2024-12-31"
-            dates = stem.split("_", 1)
-            entries.append({
-                "category": cat,
-                "symbol": sym,
-                "start": dates[0] if len(dates) > 0 else "",
-                "end": dates[1] if len(dates) > 1 else "",
-                "size_kb": round(f.stat().st_size / 1024, 1),
-                "path": str(f),
-            })
+    for f in root.rglob("*"):
+        if not f.is_file():
+            continue
+        # 跳过 meta.json 文件，只列数据文件
+        if f.suffix == ".json" and f.stem.endswith(".meta"):
+            continue
+        rel = f.relative_to(cache_dir)
+        entries.append({
+            "method": rel.parts[0] if len(rel.parts) >= 2 else "",
+            "filename": f.stem,
+            "size_kb": round(f.stat().st_size / 1024, 1),
+            "path": str(f),
+        })
     return entries
 
 
-def clear_cache(category: str = None, symbol: str = None):
+def clear_cache(method: str = None):
     """
-    清理缓存。可选指定 category 和/或 symbol 范围清理，
-    不传参数则清理全部缓存（谨慎使用）。
+    清理缓存（含按请求缓存和批量缓存）。
+    可选指定 method 范围清理，不传参数则清理全部缓存。
     """
     import shutil
-    if symbol and category:
-        target = _CACHE_ROOT / category / symbol.upper().replace("/", "-")
-    elif category:
-        target = _CACHE_ROOT / category
-    else:
-        target = _CACHE_ROOT
-
+    config = get_config()
+    cache_dir = Path(config.get("data_cache_dir", "./data_cache"))
+    target = cache_dir / method if method else cache_dir
     if target.exists():
         shutil.rmtree(target)
 
 
 def get_cache_summary() -> str:
-    """返回缓存状态摘要，供调试使用。"""
+    """返回缓存状态摘要（含按请求缓存和批量缓存），供调试使用。"""
+    config = get_config()
+    cache_dir = Path(config.get("data_cache_dir", "./data_cache"))
     entries = list_cache()
     if not entries:
-        return f"Cache is empty. Root: {_CACHE_ROOT.resolve()}"
+        return f"Cache is empty. Root: {cache_dir.resolve()}"
+
+    # 分类统计：bulk vs per-request
+    bulk_entries = [e for e in entries if e["method"] == "bulk"]
+    request_entries = [e for e in entries if e["method"] != "bulk"]
 
     total_size = sum(e["size_kb"] for e in entries)
-    cats = {}
+    methods = {}
     for e in entries:
-        cats.setdefault(e["category"], []).append(e["symbol"])
+        methods.setdefault(e["method"], 0)
+        methods[e["method"]] += 1
 
     lines = [
         f"# Data Cache Summary",
-        f"# Root: {_CACHE_ROOT.resolve()}",
-        f"# Total files: {len(entries)} | Total size: {total_size:.1f} KB\n",
+        f"# Root: {cache_dir.resolve()}",
+        f"# Total files: {len(entries)} | Total size: {total_size:.1f} KB",
+        f"# Bulk cache: {len(bulk_entries)} files | Per-request cache: {len(request_entries)} files\n",
     ]
-    for cat, symbols in cats.items():
-        unique_syms = sorted(set(symbols))
-        lines.append(f"  [{cat}] {len(unique_syms)} symbols: {', '.join(unique_syms)}")
+    for m, count in sorted(methods.items()):
+        lines.append(f"  [{m}] {count} files")
     return "\n".join(lines)

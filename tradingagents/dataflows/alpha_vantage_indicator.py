@@ -99,21 +99,21 @@ def get_indicator(
                 "datatype": "csv"
             })
         elif indicator == "macd":
-            data = _make_api_request("MACD", {
+            data = _make_api_request("MACDEXT", {
                 "symbol": symbol,
                 "interval": interval,
                 "series_type": series_type,
                 "datatype": "csv"
             })
         elif indicator == "macds":
-            data = _make_api_request("MACD", {
+            data = _make_api_request("MACDEXT", {
                 "symbol": symbol,
                 "interval": interval,
                 "series_type": series_type,
                 "datatype": "csv"
             })
         elif indicator == "macdh":
-            data = _make_api_request("MACD", {
+            data = _make_api_request("MACDEXT", {
                 "symbol": symbol,
                 "interval": interval,
                 "series_type": series_type,

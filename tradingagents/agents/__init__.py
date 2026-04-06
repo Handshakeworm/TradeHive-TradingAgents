@@ -3,12 +3,10 @@ from .utils.agent_states import AgentState, InvestDebateState, RiskDebateState
 from .utils.memory import FinancialSituationMemory
 
 from .analysts.fundamentals_analyst import create_fundamentals_analyst
+from .analysts.macro_analyst import create_macro_analyst
 from .analysts.market_analyst import create_market_analyst
 from .analysts.news_analyst import create_news_analyst
 from .analysts.sentiment_analyst import create_sentiment_analyst
-# ── 新增 Analyst ────────────────────────────────────────────────────────────
-from .analysts.crypto_analyst import create_crypto_analyst
-from .analysts.macro_analyst import create_macro_analyst
 
 from .researchers.bear_researcher import create_bear_researcher
 from .researchers.bull_researcher import create_bull_researcher
@@ -38,9 +36,7 @@ __all__ = [
     "create_aggressive_debator",
     "create_portfolio_manager",
     "create_conservative_debator",
+    "create_macro_analyst",
     "create_sentiment_analyst",
     "create_trader",
-    # 新增
-    "create_crypto_analyst",
-    "create_macro_analyst",
 ]

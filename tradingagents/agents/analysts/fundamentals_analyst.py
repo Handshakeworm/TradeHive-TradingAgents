@@ -7,7 +7,6 @@ from tradingagents.agents.utils.agent_utils import (
     get_cashflow,
     get_fundamentals,
     get_income_statement,
-    get_insider_transactions,
 )
 from tradingagents.dataflows.config import get_config
 

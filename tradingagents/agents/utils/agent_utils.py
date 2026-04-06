@@ -18,20 +18,6 @@ from tradingagents.agents.utils.news_data_tools import (
     get_insider_transactions,
     get_global_news
 )
-# ── 新增数据源工具 ──────────────────────────────────────────────────────────
-from tradingagents.agents.utils.crypto_tools import (
-    get_crypto_historical,
-    get_crypto_market_overview,
-)
-from tradingagents.agents.utils.macro_tools import (
-    get_macro_indicator,
-    get_macro_snapshot,
-    list_available_macro_series,
-)
-from tradingagents.agents.utils.sentiment_tools import (
-    get_reddit_sentiment,
-)
-
 
 def build_instrument_context(ticker: str) -> str:
     """Describe the exact instrument so agents preserve exchange-qualified tickers."""

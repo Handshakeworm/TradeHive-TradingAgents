@@ -1,59 +1,55 @@
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from tradingagents.agents.utils.agent_utils import build_instrument_context
 from tradingagents.agents.utils.macro_tools import (
-    get_macro_indicator,
-    get_macro_snapshot,
-    list_available_macro_series,
+    get_federal_funds_rate,
+    get_cpi,
+    get_real_gdp,
+    get_unemployment,
+    get_treasury_yield,
+    get_dxy,
 )
+from tradingagents.agents.utils.sentiment_tools import get_vix
 
 
 def create_macro_analyst(llm):
-    """
-    Macro Event Analyst Agent (bonus / extra-credit agent per DEV_SPEC).
-
-    Analyzes macroeconomic conditions from FRED data:
-    - Interest rate environment (FEDFUNDS, GS10, GS2, T10Y2Y)
-    - Inflation (CPIAUCSL, CPILFESL, PCEPI)
-    - Employment (UNRATE, PAYEMS, ICSA)
-    - Market stress (VIXCLS, M2SL)
-
-    Writes to state["news_report"] — can be selected as a replacement for
-    "news" analyst when macro context is more relevant than company news,
-    or used alongside news analyst for richer context.
-    """
-
     def macro_analyst_node(state):
         current_date = state["trade_date"]
-        instrument_context = build_instrument_context(state["company_of_interest"])
+        ticker = state["company_of_interest"]
+        instrument_context = build_instrument_context(ticker)
 
         tools = [
-            get_macro_snapshot,
-            get_macro_indicator,
-            list_available_macro_series,
+            get_federal_funds_rate,
+            get_cpi,
+            get_real_gdp,
+            get_unemployment,
+            get_treasury_yield,
+            get_dxy,
+            get_vix,
         ]
 
         system_message = (
-            "You are a macroeconomic research analyst specializing in understanding "
-            "how macro conditions affect equity and crypto asset prices. "
-            "Your job is to assess the current macroeconomic environment and its "
-            "implications for the target instrument.\n\n"
-            "Workflow:\n"
-            "1. Start with get_macro_snapshot(date) for a quick overview of current conditions\n"
-            "2. Use get_macro_indicator() to pull detailed history on the most relevant series:\n"
-            "   - Rate environment: FEDFUNDS, GS10, GS2, T10Y2Y (yield curve inversion?)\n"
-            "   - Inflation: CPIAUCSL or CPILFESL (trending up or cooling?)\n"
-            "   - Labor market: UNRATE, PAYEMS (employment strength)\n"
-            "   - Market stress: VIXCLS (fear gauge), M2SL (liquidity)\n"
-            "3. Use list_available_macro_series() if you need to discover other series IDs\n\n"
-            "Structure your macro report:\n"
-            "1. **Rate & Monetary Policy Outlook**: Fed trajectory, rate level, yield curve shape\n"
-            "2. **Inflation Regime**: CPI/PCE trend — above/below target, direction of change\n"
-            "3. **Employment & Growth**: Labor market strength, GDP trajectory\n"
-            "4. **Market Stress Indicators**: VIX level and trend, credit spreads if available\n"
-            "5. **Macro Impact on Target Asset**: Tailwinds vs. headwinds for the instrument\n"
-            "6. **Overall Macro Signal**: BULLISH / NEUTRAL / BEARISH macro backdrop\n"
-            "7. **Markdown Table**: Key macro indicators with latest values and trend direction\n\n"
-            "Be quantitative — always cite specific values and dates from tool outputs."
+            f"You are a macroeconomic analyst tasked with assessing how the current macro environment "
+            f"affects {ticker} specifically — not the economy in general. "
+            "Your workflow: "
+            f"1) Call get_federal_funds_rate(curr_date) and get_treasury_yield(curr_date, maturity='10year') "
+            f"to understand monetary policy stance and yield curve shape, then analyze how current rate levels "
+            f"affect {ticker}'s valuation multiple, debt costs, and capital allocation. "
+            f"2) Call get_cpi(curr_date) to assess inflation trajectory and its implications for Fed policy "
+            f"and {ticker}'s cost structure or pricing power. "
+            f"3) Call get_real_gdp(curr_date) to gauge economic growth momentum and its effect on "
+            f"{ticker}'s revenue outlook and end-market demand. "
+            f"4) Call get_unemployment(curr_date) to understand labor market conditions and their impact "
+            f"on consumer spending relevant to {ticker}'s customer base. "
+            f"5) Call get_vix(start_date, end_date) for the past month to assess market risk appetite "
+            f"and how fear/complacency levels affect {ticker}'s trading environment. "
+            f"6) Call get_dxy(start_date, end_date) for the past month to understand USD strength "
+            f"and its impact on {ticker}'s international revenues or input costs. "
+            f"Your report MUST: "
+            f"(a) Connect each macro indicator directly to {ticker} with specific reasoning. "
+            f"(b) Deliver an overall macro environment verdict: Tailwind / Neutral / Headwind for {ticker}, "
+            f"with a 2-3 sentence justification. "
+            f"(c) Append a Markdown summary table at the end organizing each indicator, its current level, "
+            f"trend, and impact on {ticker}."
         )
 
         prompt = ChatPromptTemplate.from_messages(
@@ -74,7 +70,7 @@ def create_macro_analyst(llm):
         )
 
         prompt = prompt.partial(system_message=system_message)
-        prompt = prompt.partial(tool_names=", ".join([t.name for t in tools]))
+        prompt = prompt.partial(tool_names=", ".join([tool.name for tool in tools]))
         prompt = prompt.partial(current_date=current_date)
         prompt = prompt.partial(instrument_context=instrument_context)
 
@@ -87,7 +83,7 @@ def create_macro_analyst(llm):
 
         return {
             "messages": [result],
-            "news_report": report,
+            "macro_report": report,
         }
 
     return macro_analyst_node

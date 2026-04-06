@@ -8,10 +8,136 @@
 依赖：pip install vaderSentiment praw（praw 为可选，仅需 Reddit 时安装）
 """
 
+import json
+from collections import defaultdict
+from datetime import datetime
 from typing import Annotated
-from datetime import datetime, timedelta
-import os
-import pandas as pd
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Alpha Vantage NEWS_SENTIMENT 聚合
+# ─────────────────────────────────────────────────────────────────────────────
+
+def get_sentiment_summary(ticker: str, start_date: str, end_date: str) -> str:
+    """
+    从 bulk cache 中读取新闻 JSON，按日聚合 ticker 的情绪评分，返回格式化表格。
+
+    Args:
+        ticker: 股票代码，如 "NVDA"
+        start_date: 开始日期 yyyy-mm-dd
+        end_date: 结束日期 yyyy-mm-dd
+
+    Returns:
+        按日汇总的情绪统计表格字符串
+    """
+    from tradingagents.dataflows.bulk_cache import bulk_has, bulk_load
+
+    # 读取缓存新闻（新闻缓存扩展名为 .txt）
+    if not bulk_has(ticker, "news", ext=".txt"):
+        return f"No cached news data found for {ticker}."
+
+    raw = bulk_load(ticker, "news", ext=".txt")
+    if not raw:
+        return f"Failed to load news cache for {ticker}."
+
+    try:
+        data = json.loads(raw)
+    except (json.JSONDecodeError, TypeError):
+        return f"Invalid news cache format for {ticker}."
+
+    feed = data.get("feed", [])
+    if not feed:
+        return f"No news articles found for {ticker}."
+
+    # 日期范围过滤
+    start_dt = datetime.strptime(start_date, "%Y-%m-%d")
+    end_dt = datetime.strptime(end_date, "%Y-%m-%d").replace(hour=23, minute=59, second=59)
+
+    # 按日聚合
+    daily: dict[str, list[float]] = defaultdict(list)
+
+    for article in feed:
+        tp = article.get("time_published", "")
+        if len(tp) < 8:
+            continue
+        try:
+            article_dt = datetime.strptime(tp[:15], "%Y%m%dT%H%M%S")
+        except ValueError:
+            try:
+                article_dt = datetime.strptime(tp[:8], "%Y%m%d")
+            except ValueError:
+                continue
+
+        if not (start_dt <= article_dt <= end_dt):
+            continue
+
+        date_key = article_dt.strftime("%Y-%m-%d")
+
+        # 优先用 ticker_sentiment，降级到 overall_sentiment
+        ticker_upper = ticker.upper()
+        ticker_score = None
+        for ts in article.get("ticker_sentiment", []):
+            if ts.get("ticker", "").upper() == ticker_upper:
+                try:
+                    ticker_score = float(ts["ticker_sentiment_score"])
+                except (KeyError, ValueError):
+                    pass
+                break
+
+        if ticker_score is None:
+            raw_score = article.get("overall_sentiment_score")
+            if raw_score is None:
+                continue
+            try:
+                ticker_score = float(raw_score)
+            except (TypeError, ValueError):
+                continue
+
+        daily[date_key].append(ticker_score)
+
+    if not daily:
+        return f"No news articles found for {ticker} between {start_date} and {end_date}."
+
+    # 构建输出表格
+    lines = [
+        f"# Sentiment Summary for {ticker.upper()} ({start_date} to {end_date})",
+        "",
+        "| Date | Avg Score | Label | Bullish | Neutral | Bearish | Articles |",
+        "|------|-----------|-------|---------|---------|---------|----------|",
+    ]
+
+    for date in sorted(daily.keys()):
+        scores = daily[date]
+        avg = sum(scores) / len(scores)
+        bullish = sum(1 for s in scores if s >= 0.15)
+        bearish = sum(1 for s in scores if s <= -0.15)
+        neutral = len(scores) - bullish - bearish
+        total = len(scores)
+
+        if avg >= 0.35:
+            label = "Bullish"
+        elif avg >= 0.15:
+            label = "Somewhat-Bullish"
+        elif avg <= -0.35:
+            label = "Bearish"
+        elif avg <= -0.15:
+            label = "Somewhat-Bearish"
+        else:
+            label = "Neutral"
+
+        lines.append(
+            f"| {date} | {avg:+.3f} | {label} | {bullish} | {neutral} | {bearish} | {total} |"
+        )
+
+    # 整体汇总
+    all_scores = [s for scores in daily.values() for s in scores]
+    overall_avg = sum(all_scores) / len(all_scores)
+    lines += [
+        "",
+        f"**Overall period avg: {overall_avg:+.3f} | Total articles: {len(all_scores)}**",
+    ]
+
+    return "\n".join(lines)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -52,103 +178,5 @@ def _label_sentiment(compound: float) -> str:
     elif compound <= -0.05:
         return "NEGATIVE"
     return "NEUTRAL"
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# 工具函数（供 interface.py 注册为 Agent 可调用工具）
-# ─────────────────────────────────────────────────────────────────────────────
-
-def get_reddit_sentiment(
-    ticker: Annotated[str, "Stock or crypto ticker symbol"],
-    date: Annotated[str, "Reference date in yyyy-mm-dd format"],
-    subreddits: Annotated[str, "Comma-separated subreddits, e.g. 'wallstreetbets,stocks,investing'"] = "wallstreetbets,stocks,investing",
-    limit: Annotated[int, "Max posts per subreddit"] = 25,
-) -> str:
-    """
-    从 Reddit 抓取相关帖子并进行 VADER 情绪评分（可选功能）。
-    需要在 .env 中配置：
-      REDDIT_CLIENT_ID, REDDIT_CLIENT_SECRET, REDDIT_USER_AGENT
-    申请地址（免费）：https://www.reddit.com/prefs/apps
-    """
-    client_id = os.getenv("REDDIT_CLIENT_ID")
-    client_secret = os.getenv("REDDIT_CLIENT_SECRET")
-    user_agent = os.getenv("REDDIT_USER_AGENT", "tradehive_sentiment/1.0")
-
-    if not client_id or not client_secret:
-        return (
-            "Reddit credentials not configured.\n"
-            "Please add to .env:\n"
-            "  REDDIT_CLIENT_ID=your_id\n"
-            "  REDDIT_CLIENT_SECRET=your_secret\n"
-            "  REDDIT_USER_AGENT=tradehive_sentiment/1.0\n"
-            "Apply at: https://www.reddit.com/prefs/apps (free)"
-        )
-
-    try:
-        import praw
-    except ImportError:
-        return "praw 未安装，请运行: pip install praw"
-
-    try:
-        sia = _get_vader()
-    except ImportError as e:
-        return str(e)
-
-    reddit = praw.Reddit(
-        client_id=client_id,
-        client_secret=client_secret,
-        user_agent=user_agent,
-    )
-
-    scored = []
-    ref_dt = datetime.strptime(date, "%Y-%m-%d")
-    # 计算回溯天数窗口（默认抓近7天；time_filter 只是 Reddit 搜索参数，
-    # 实际时间过滤在下方通过 post.created_utc 精确筛选）
-    cutoff_start = ref_dt - timedelta(days=7)
-
-    for sub_name in [s.strip() for s in subreddits.split(",")]:
-        try:
-            subreddit = reddit.subreddit(sub_name)
-            for post in subreddit.search(ticker, limit=limit, time_filter="month"):
-                post_dt = datetime.utcfromtimestamp(post.created_utc)
-                # 严格按时间窗口过滤：只保留 [cutoff_start, ref_dt] 范围内的帖子
-                if not (cutoff_start <= post_dt <= ref_dt + timedelta(days=1)):
-                    continue
-                text = f"{post.title}. {post.selftext[:200]}".strip()
-                scores = sia.polarity_scores(text)
-                compound = round(scores["compound"], 4)
-                scored.append({
-                    "subreddit": sub_name,
-                    "date": post_dt.strftime("%Y-%m-%d"),
-                    "title": post.title[:90],
-                    "score": post.score,
-                    "sentiment": _label_sentiment(compound),
-                    "compound": compound,
-                })
-        except Exception:
-            continue
-
-    if not scored:
-        return f"No Reddit posts found for {ticker} across {subreddits}."
-
-    df = pd.DataFrame(scored).sort_values("compound")
-    avg_compound = df["compound"].mean()
-    overall_label = _label_sentiment(avg_compound)
-
-    lines = [
-        f"# Reddit Sentiment Report: {ticker.upper()}",
-        f"# Reference date: {date} | Subreddits: {subreddits}",
-        f"# Source: Reddit API + VADER\n",
-        f"Overall Sentiment:   {overall_label} (avg compound: {avg_compound:.4f})",
-        f"Posts analyzed:      {len(df)}\n",
-        f"{'Subreddit':<22} {'Date':<12} {'Sentiment':<10} {'Score':>7}  Title",
-        "-" * 85,
-    ]
-    for _, row in df.iterrows():
-        lines.append(
-            f"{row['subreddit']:<22} {row['date']:<12} {row['sentiment']:<10} "
-            f"{row['compound']:>7.4f}  {row['title']}"
-        )
-    return "\n".join(lines)
 
 

@@ -2,6 +2,7 @@ from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 import time
 import json
 from tradingagents.agents.utils.agent_utils import build_instrument_context, get_news
+from tradingagents.agents.utils.sentiment_tools import get_sentiment_summary, get_vix
 from tradingagents.dataflows.config import get_config
 
 
@@ -12,10 +13,18 @@ def create_sentiment_analyst(llm):
 
         tools = [
             get_news,
+            get_sentiment_summary,
+            get_vix,
         ]
 
         system_message = (
-            "You are a social media and company specific news researcher/analyst tasked with analyzing social media posts, recent company news, and public sentiment for a specific company over the past week. You will be given a company's name your objective is to write a comprehensive long report detailing your analysis, insights, and implications for traders and investors on this company's current state after looking at social media and what people are saying about that company, analyzing sentiment data of what people feel each day about the company, and looking at recent company news. Use the get_news(query, start_date, end_date) tool to search for company-specific news and social media discussions. Try to look at all sources possible from social media to sentiment to news. Provide specific, actionable insights with supporting evidence to help traders make informed decisions."
+            "You are a sentiment analyst tasked with quantifying and interpreting market sentiment for a specific company. "
+            "Your workflow: "
+            "1) Call get_sentiment_summary(ticker, start_date, end_date) first to get a daily aggregated sentiment table — this shows average sentiment scores, bullish/neutral/bearish article counts per day, and the overall period average. "
+            "2) Call get_vix(start_date, end_date) to get the VIX volatility index as macroeconomic fear/greed context for the same period. "
+            "3) Call get_news(ticker, start_date, end_date) to retrieve the underlying news articles and identify key sentiment drivers (major events, earnings, product launches, controversies). "
+            "Your report must include: a quantitative sentiment trend section (referencing the daily scores from get_sentiment_summary), VIX context (whether market fear elevated or suppressed sentiment), identification of key sentiment-shifting events with dates, and an overall sentiment verdict. "
+            "Provide specific, actionable insights with supporting evidence to help traders make informed decisions."
             + """ Make sure to append a Markdown table at the end of the report to organize key points in the report, organized and easy to read."""
         )
 

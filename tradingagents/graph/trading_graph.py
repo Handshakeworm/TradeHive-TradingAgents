@@ -31,12 +31,15 @@ from tradingagents.agents.utils.agent_utils import (
     get_news,
     get_insider_transactions,
     get_global_news,
-    # 新增数据源工具
-    get_crypto_historical,
-    get_crypto_market_overview,
-    get_macro_indicator,
-    get_macro_snapshot,
-    list_available_macro_series,
+)
+from tradingagents.agents.utils.sentiment_tools import get_sentiment_summary, get_vix
+from tradingagents.agents.utils.macro_tools import (
+    get_federal_funds_rate,
+    get_cpi,
+    get_real_gdp,
+    get_unemployment,
+    get_treasury_yield,
+    get_dxy,
 )
 
 from .conditional_logic import ConditionalLogic
@@ -51,7 +54,7 @@ class TradingAgentsGraph:
 
     def __init__(
         self,
-        selected_analysts=["market", "sentiment", "news", "fundamentals"],
+        selected_analysts=["market", "sentiment", "news", "fundamentals", "macro"],
         debug=False,
         config: Dict[str, Any] = None,
         callbacks: Optional[List] = None,
@@ -176,6 +179,8 @@ class TradingAgentsGraph:
                 [
                     # News tools for sentiment analysis
                     get_news,
+                    get_sentiment_summary,
+                    get_vix,
                 ]
             ),
             "news": ToolNode(
@@ -195,19 +200,16 @@ class TradingAgentsGraph:
                     get_income_statement,
                 ]
             ),
-            # ── 新增数据源 ToolNode ─────────────────────────────────────
-            "crypto": ToolNode(
-                [
-                    get_crypto_historical,
-                    get_crypto_market_overview,
-                    get_macro_snapshot,
-                ]
-            ),
             "macro": ToolNode(
                 [
-                    get_macro_snapshot,
-                    get_macro_indicator,
-                    list_available_macro_series,
+                    # Macroeconomic indicator tools
+                    get_federal_funds_rate,
+                    get_cpi,
+                    get_real_gdp,
+                    get_unemployment,
+                    get_treasury_yield,
+                    get_dxy,
+                    get_vix,
                 ]
             ),
         }
@@ -230,7 +232,13 @@ class TradingAgentsGraph:
                 if len(chunk["messages"]) == 0:
                     pass
                 else:
-                    chunk["messages"][-1].pretty_print()
+                    try:
+                        chunk["messages"][-1].pretty_print()
+                    except UnicodeEncodeError:
+                        # Windows GBK 终端无法显示 emoji 等特殊字符，去掉非 ASCII 字符后输出
+                        content = str(chunk["messages"][-1].content)
+                        safe = content.encode("ascii", errors="ignore").decode("ascii")
+                        print(safe)
                     trace.append(chunk)
 
             final_state = trace[-1]
