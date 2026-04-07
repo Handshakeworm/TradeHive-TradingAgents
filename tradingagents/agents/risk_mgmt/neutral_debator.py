@@ -1,4 +1,3 @@
-import time
 import json
 
 
@@ -16,27 +15,46 @@ def create_neutral_debator(llm):
         news_report = state["news_report"]
         fundamentals_report = state["fundamentals_report"]
 
-        trader_decision = state["trader_investment_plan"]
+        # Parse Trader's quantitative plan
+        trader_plan_raw = state["trader_investment_plan"]
+        try:
+            trader_plan = json.loads(trader_plan_raw)
+        except (json.JSONDecodeError, TypeError):
+            trader_plan = {}
+
         count = risk_debate_state.get("count", 0)
 
         if count == 0:
-            data_context = f"""Use insights from the following data sources to support a moderate, sustainable strategy to adjust the trader's decision:
+            data_context = f"""Use insights from the following data sources to support a balanced strategy:
 
 Market Research Report: {market_research_report}
 Social Media Sentiment Report: {sentiment_report}
 Latest World Affairs Report: {news_report}
 Company Fundamentals Report: {fundamentals_report}"""
         else:
-            data_context = "Use the debate history to support a moderate, sustainable strategy to adjust the trader's decision."
+            data_context = "Use the debate history to support a balanced strategy."
 
-        prompt = f"""As the Neutral Risk Analyst, your role is to provide a balanced perspective, weighing both the potential benefits and risks of the trader's decision or plan. You prioritize a well-rounded approach, evaluating the upsides and downsides while factoring in broader market trends, potential economic shifts, and diversification strategies. Here is the trader's decision:
+        prompt = f"""As the Neutral Risk Analyst, your role is to provide a balanced perspective on the Trader's plan. Evaluate whether the proposed parameters strike the right balance between risk and reward.
 
-{trader_decision}
+**Trader's Proposed Plan:**
+- Action: {trader_plan.get('action', 'N/A')}
+- Target position: {trader_plan.get('target_position_pct', 'N/A')}% of capital
+- Take-profit: {trader_plan.get('take_profit_price', 'N/A')}
+- Stop-loss: {trader_plan.get('stop_loss_price', 'N/A')}
 
-Your task is to challenge both the Aggressive and Conservative Analysts, pointing out where each perspective may be overly optimistic or overly cautious. {data_context}
-Here is the current conversation history: {history} Here is the last response from the aggressive analyst: {current_aggressive_response} Here is the last response from the conservative analyst: {current_conservative_response}. If there are no responses from the other viewpoints yet, present your own argument based on the available data.
+**Your stance — argue for balanced parameters:**
+- Position size: evaluate if it matches the conviction level and market conditions
+- Take-profit: is it realistic given current price action and volatility?
+- Stop-loss: does it protect against real risk without triggering on normal fluctuations?
 
-Engage actively by analyzing both sides critically, addressing weaknesses in the aggressive and conservative arguments to advocate for a more balanced approach. Challenge each of their points to illustrate why a moderate risk strategy might offer the best of both worlds, providing growth potential while safeguarding against extreme volatility. Focus on debating rather than simply presenting data, aiming to show that a balanced view can lead to the most reliable outcomes. Output conversationally as if you are speaking without any special formatting."""
+Challenge both the aggressive and conservative analysts. Point out where the aggressive stance takes unnecessary gambles AND where the conservative stance leaves money on the table.
+
+{data_context}
+Conversation history: {history}
+Last aggressive argument: {current_aggressive_response}
+Last conservative argument: {current_conservative_response}
+
+If there are no responses from the other viewpoints yet, present your own argument based on the available data. Speak conversationally without special formatting."""
 
         response = llm.invoke(prompt)
 
@@ -48,9 +66,7 @@ Engage actively by analyzing both sides critically, addressing weaknesses in the
             "conservative_history": risk_debate_state.get("conservative_history", ""),
             "neutral_history": neutral_history + "\n" + argument,
             "latest_speaker": "Neutral",
-            "current_aggressive_response": risk_debate_state.get(
-                "current_aggressive_response", ""
-            ),
+            "current_aggressive_response": risk_debate_state.get("current_aggressive_response", ""),
             "current_conservative_response": risk_debate_state.get("current_conservative_response", ""),
             "current_neutral_response": argument,
             "count": risk_debate_state["count"] + 1,

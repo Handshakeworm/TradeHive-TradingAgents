@@ -11,14 +11,38 @@ from tradingagents.agents.utils.agent_states import (
 class Propagator:
     """Handles state initialization and propagation through the graph."""
 
-    def __init__(self, max_recur_limit=100):
+    def __init__(self, max_recur_limit=200):
         """Initialize with configuration parameters."""
         self.max_recur_limit = max_recur_limit
 
+    # Default empty-position state for when no position data is provided
+    _DEFAULT_POSITION = {
+        "current_position_pct": 0.0,
+        "avg_cost": 0.0,
+        "total_capital": 0.0,
+        "current_stop_loss": None,
+        "current_take_profit": None,
+        "last_action": "Hold",
+        "unrealized_pnl_pct": 0.0,
+    }
+
     def create_initial_state(
-        self, company_name: str, trade_date: str
+        self,
+        company_name: str,
+        trade_date: str,
+        position_state: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
-        """Create the initial state for the agent graph."""
+        """Create the initial state for the agent graph.
+
+        Args:
+            company_name: Ticker or company name to analyse.
+            trade_date: Trading date string.
+            position_state: Optional dict with position-tracking fields
+                (current_position_pct, avg_cost, total_capital, etc.).
+                If *None*, defaults to an empty-position state.
+        """
+        pos = {**self._DEFAULT_POSITION, **(position_state or {})}
+
         return {
             "messages": [("human", company_name)],
             "company_of_interest": company_name,
@@ -52,6 +76,8 @@ class Propagator:
             "sentiment_report": "",
             "news_report": "",
             "macro_report": "",
+            # position tracking
+            **pos,
         }
 
     def get_graph_args(self, callbacks: Optional[List] = None) -> Dict[str, Any]:

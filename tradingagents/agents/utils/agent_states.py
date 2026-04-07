@@ -1,6 +1,6 @@
-from typing import Annotated, Sequence
+from typing import Annotated, Sequence, Optional
 from datetime import date, timedelta, datetime
-from typing_extensions import TypedDict, Optional
+from typing_extensions import TypedDict
 from langchain_openai import ChatOpenAI
 from tradingagents.agents import *
 from langgraph.prebuilt import ToolNode
@@ -75,3 +75,12 @@ class AgentState(MessagesState):
         RiskDebateState, "Current state of the debate on evaluating risk"
     ]
     final_trade_decision: Annotated[str, "Final decision made by the Risk Analysts"]
+
+    # position tracking (injected by backtesting engine)
+    current_position_pct: Annotated[float, "Current position as % of total capital (0-100)"]
+    avg_cost: Annotated[float, "Average cost of current position"]
+    total_capital: Annotated[float, "Total account value (cash + position market value)"]
+    current_stop_loss: Annotated[Optional[float], "Current stop-loss price"]
+    current_take_profit: Annotated[Optional[float], "Current take-profit price"]
+    last_action: Annotated[str, "Last action taken: Buy/Sell/Hold"]
+    unrealized_pnl_pct: Annotated[float, "Unrealized PnL as percentage"]

@@ -1,7 +1,10 @@
-import time
 import json
 
 from tradingagents.agents.utils.agent_utils import build_instrument_context
+from tradingagents.agents.utils.schemas import (
+    ResearchManagerDecision,
+    invoke_structured,
+)
 
 
 def create_research_manager(llm, memory):
@@ -15,6 +18,13 @@ def create_research_manager(llm, memory):
 
         investment_debate_state = state["investment_debate_state"]
 
+        # Position context
+        position_pct = state.get("current_position_pct", 0)
+        avg_cost = state.get("avg_cost", 0)
+        unrealized_pnl = state.get("unrealized_pnl_pct", 0)
+        last_action = state.get("last_action", "Hold")
+
+        # Retrieve past memories
         curr_situation = f"{market_research_report}\n\n{sentiment_report}\n\n{news_report}\n\n{fundamentals_report}"
         past_memories = memory.get_memories(curr_situation, n_matches=2)
 
@@ -22,39 +32,40 @@ def create_research_manager(llm, memory):
         for i, rec in enumerate(past_memories, 1):
             past_memory_str += rec["recommendation"] + "\n\n"
 
-        prompt = f"""As the portfolio manager and debate facilitator, your role is to critically evaluate this round of debate and make a definitive decision: align with the bear analyst, the bull analyst, or choose Hold only if it is strongly justified based on the arguments presented.
+        prompt = f"""As the Research Manager and debate facilitator, critically evaluate this round of bull vs bear debate and make a decisive directional call.
 
-Summarize the key points from both sides concisely, focusing on the most compelling evidence or reasoning. Your recommendation—Buy, Sell, or Hold—must be clear and actionable. Avoid defaulting to Hold simply because both sides have valid points; commit to a stance grounded in the debate's strongest arguments.
+Your task is simple: decide Buy, Sell, or Hold. Do NOT create a detailed investment plan — that is the Trader's job. Focus only on the direction and your core reasoning.
 
-Additionally, develop a detailed investment plan for the trader. This should include:
-
-Your Recommendation: A decisive stance supported by the most convincing arguments.
-Rationale: An explanation of why these arguments lead to your conclusion.
-Strategic Actions: Concrete steps for implementing the recommendation.
-Take into account your past mistakes on similar situations. Use these insights to refine your decision-making and ensure you are learning and improving. Present your analysis conversationally, as if speaking naturally, without special formatting. 
-
-Here are your past reflections on mistakes:
-\"{past_memory_str}\"
+- Align with the bull analyst, the bear analyst, or choose Hold only if strongly justified.
+- Avoid defaulting to Hold simply because both sides have valid points — commit to a stance.
+- Take into account your past mistakes on similar situations.
 
 {instrument_context}
 
-Here is the debate:
+Current position: {position_pct:.1f}% of capital | Avg cost: {avg_cost:.2f} | Unrealized PnL: {unrealized_pnl:.1f}% | Last action: {last_action}
+
+Past reflections on mistakes:
+"{past_memory_str}"
+
 Debate History:
 {history}"""
-        response = llm.invoke(prompt)
+
+        decision = invoke_structured(llm, ResearchManagerDecision, prompt)
+
+        decision_json = decision.model_dump_json()
 
         new_investment_debate_state = {
-            "judge_decision": response.content,
+            "judge_decision": decision_json,
             "history": investment_debate_state.get("history", ""),
             "bear_history": investment_debate_state.get("bear_history", ""),
             "bull_history": investment_debate_state.get("bull_history", ""),
-            "current_response": response.content,
+            "current_response": decision_json,
             "count": investment_debate_state["count"],
         }
 
         return {
             "investment_debate_state": new_investment_debate_state,
-            "investment_plan": response.content,
+            "investment_plan": decision_json,
         }
 
     return research_manager_node

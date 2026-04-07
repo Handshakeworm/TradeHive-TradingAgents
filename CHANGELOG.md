@@ -895,3 +895,134 @@ data_cache/bulk/NVDA/
 
 ---
 
+## 版本：v0.4.0 — 节点职能改造 + 结构化输出 + 回测引擎
+
+**改动日期**：2026-04-07  
+**改动摘要**：重新划分各决策节点职能（RM 方向决策、Trader 量化规划、PM 最终指令），三个决策节点接入 Pydantic 结构化输出，风险辩论从定性改为定量，新增持仓追踪系统和日线级别回测引擎。
+
+---
+
+### 一、决策节点职能重新划分
+
+**改动前**：Research Manager 既做方向判断又制定投资计划，Trader 仅评估可行性，PM 做 5 级评级（Buy/Overweight/Hold/Underweight/Sell），职责重叠。
+
+**改动后**：
+
+| 节点 | 模型 | 职责 |
+|------|------|------|
+| Research Manager | Deep | 方向决策：只输出 Buy/Sell/Hold + 核心理由 |
+| Trader | Deep（原为 Quick） | 执行规划：目标仓位%、止盈价、止损价 |
+| PM | Deep | 最终拍板：综合风险辩论，输出可执行指令 |
+
+| 文件 | 操作 |
+|------|------|
+| `tradingagents/agents/managers/research_manager.py` | 删除投资计划制定，聚焦方向性决策，注入持仓状态 |
+| `tradingagents/agents/trader/trader.py` | 完全重写为执行规划者，解析 RM 的 JSON 决策，输出量化参数 |
+| `tradingagents/agents/managers/portfolio_manager.py` | 评级从 5 级简化为 3 级，解析 Trader JSON，注入持仓状态 |
+| `tradingagents/graph/setup.py` | Trader 的 LLM 从 `quick_thinking_llm` 切换为 `deep_thinking_llm` |
+
+---
+
+### 二、结构化输出（Pydantic Schema + 重试机制）
+
+**改动前**：三个决策节点输出自由文本，需要 LLM 二次解析提取信号。
+
+**改动后**：通过 `with_structured_output(schema, method="json_schema")` 约束输出，Pydantic `model_validator` 校验 SL/TP 一致性，`invoke_structured()` 辅助函数实现校验失败反馈重试 + 网络异常指数退避。
+
+**Schema 定义**：
+- `ResearchManagerDecision`：action + reasoning
+- `TraderDecision`：action + target_position_pct + take_profit_price + stop_loss_price + reasoning
+- `PortfolioManagerDecision`：同 TraderDecision
+
+**Pydantic 校验规则**：
+- `stop_loss_price > 0`，`take_profit_price > 0`
+- `stop_loss_price < take_profit_price`
+
+| 文件 | 操作 |
+|------|------|
+| `tradingagents/agents/utils/schemas.py` | 新建，3 个 Pydantic schema + `invoke_structured()` 辅助函数 |
+| `tradingagents/graph/signal_processing.py` | 优先 `json.loads()` 提取 action，失败时回退 LLM 解析；评级从 5 级改为 3 级 |
+
+---
+
+### 三、风险辩论定量化
+
+**改动前**：激进/保守/中性三方做定性辩论（"风险太大"/"值得投资"）。
+
+**改动后**：三方围绕 Trader 给出的具体参数（仓位比例、止盈/止损价位）展开定量辩论：
+- 激进方：主张更大仓位、更高止盈、更宽止损
+- 保守方：主张更小仓位、更低止盈、更紧止损
+- 中性方：平衡两方，评估参数合理性
+
+| 文件 | 操作 |
+|------|------|
+| `tradingagents/agents/risk_mgmt/aggressive_debator.py` | 解析 Trader JSON，围绕具体参数辩论 |
+| `tradingagents/agents/risk_mgmt/conservative_debator.py` | 同上 |
+| `tradingagents/agents/risk_mgmt/neutral_debator.py` | 同上 |
+
+---
+
+### 四、持仓状态注入
+
+**改动前**：每次 `propagate()` 无持仓上下文，agent 不知道当前仓位情况。
+
+**改动后**：AgentState 新增 7 个持仓字段，由回测引擎每日注入，各决策节点在 prompt 中读取持仓信息辅助决策。
+
+| 字段 | 含义 |
+|------|------|
+| `current_position_pct` | 当前仓位占总资金比例 0-100% |
+| `avg_cost` | 持仓均价 |
+| `total_capital` | 账户总资产 |
+| `current_stop_loss` | 当前止损价 |
+| `current_take_profit` | 当前止盈价 |
+| `last_action` | 上一次操作 Buy/Sell/Hold |
+| `unrealized_pnl_pct` | 未实现盈亏百分比 |
+
+| 文件 | 操作 |
+|------|------|
+| `tradingagents/agents/utils/agent_states.py` | AgentState 新增 7 个持仓字段 |
+| `tradingagents/graph/propagation.py` | `create_initial_state()` 支持 `position_state` 参数注入 |
+| `tradingagents/graph/trading_graph.py` | `propagate()` 新增 `position_state` 参数 |
+
+---
+
+### 五、回测引擎
+
+**新增模块** `tradingagents/backtesting/`，实现日线级别回测：
+
+**每日流程**：
+1. 开盘：以开盘价执行前一日 PM 指令
+2. 盘中：用当日高低价检查止盈/止损是否触发（止损优先）
+3. 收盘：更新持仓数据，注入 agent state，运行完整 pipeline
+4. 保存 PM 输出，留待次日执行
+
+**引擎侧 SL/TP Sanity Check**：止损价必须低于当前价，止盈价必须高于当前价，否则丢弃。防止模型输出荒谬值导致错误触发。
+
+| 文件 | 操作 |
+|------|------|
+| `tradingagents/backtesting/__init__.py` | 新建，导出 PositionTracker 和 BacktestEngine |
+| `tradingagents/backtesting/position.py` | 新建，持仓管理（下单执行、止盈止损检查、状态导出） |
+| `tradingagents/backtesting/engine.py` | 新建，日循环回测引擎，从 bulk cache 读取 OHLC 数据 |
+| `main.py` | 改为回测模式入口 |
+
+---
+
+### 六、可视化与指标计算
+
+**新增** `visualize_backtest.py`，从回测结果 JSON 生成 4 面板图表（净值曲线、回撤、仓位、交易活动）+ 计算关键指标（CAGR、波动率、夏普比率、最大回撤、换手率、交易成本），并与 Buy & Hold 基准对比。
+
+---
+
+### 七、Bug 修复
+
+1. **Recursion limit 过紧**：5 个分析师 + 两轮辩论的总节点调用容易超过 100 次上限，改为 200。
+2. **SL/TP 错误触发**：模型偶尔输出止损价高于市价的荒谬值，导致盘中必定触发止损。新增 Pydantic 层校验（SL < TP）和引擎层校验（SL < 当前价，TP > 当前价）双重防护。
+
+| 文件 | 操作 |
+|------|------|
+| `tradingagents/graph/propagation.py` | `max_recur_limit` 从 100 改为 200 |
+| `tradingagents/agents/utils/schemas.py` | 新增 `model_validator` 校验 SL < TP 且均为正值 |
+| `tradingagents/backtesting/position.py` | `execute_order` 新增 SL/TP vs 市价 sanity check |
+
+---
+

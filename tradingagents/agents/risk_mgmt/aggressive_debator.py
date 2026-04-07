@@ -1,4 +1,3 @@
-import time
 import json
 
 
@@ -16,7 +15,13 @@ def create_aggressive_debator(llm):
         news_report = state["news_report"]
         fundamentals_report = state["fundamentals_report"]
 
-        trader_decision = state["trader_investment_plan"]
+        # Parse Trader's quantitative plan
+        trader_plan_raw = state["trader_investment_plan"]
+        try:
+            trader_plan = json.loads(trader_plan_raw)
+        except (json.JSONDecodeError, TypeError):
+            trader_plan = {}
+
         count = risk_debate_state.get("count", 0)
 
         if count == 0:
@@ -29,14 +34,27 @@ Company Fundamentals Report: {fundamentals_report}"""
         else:
             data_context = ""
 
-        prompt = f"""As the Aggressive Risk Analyst, your role is to actively champion high-reward, high-risk opportunities, emphasizing bold strategies and competitive advantages. When evaluating the trader's decision or plan, focus intently on the potential upside, growth potential, and innovative benefits—even when these come with elevated risk. Use the provided market data and sentiment analysis to strengthen your arguments and challenge the opposing views. Specifically, respond directly to each point made by the conservative and neutral analysts, countering with data-driven rebuttals and persuasive reasoning. Highlight where their caution might miss critical opportunities or where their assumptions may be overly conservative. Here is the trader's decision:
+        prompt = f"""As the Aggressive Risk Analyst, your role is to argue for MAXIMIZING returns by taking on more risk. You are reviewing the Trader's specific plan and debating whether the parameters are too conservative.
 
-{trader_decision}
+**Trader's Proposed Plan:**
+- Action: {trader_plan.get('action', 'N/A')}
+- Target position: {trader_plan.get('target_position_pct', 'N/A')}% of capital
+- Take-profit: {trader_plan.get('take_profit_price', 'N/A')}
+- Stop-loss: {trader_plan.get('stop_loss_price', 'N/A')}
 
-Your task is to create a compelling case for the trader's decision by questioning and critiquing the conservative and neutral stances to demonstrate why your high-reward perspective offers the best path forward. {data_context}
-Here is the current conversation history: {history} Here are the last arguments from the conservative analyst: {current_conservative_response} Here are the last arguments from the neutral analyst: {current_neutral_response}. If there are no responses from the other viewpoints yet, present your own argument based on the available data.
+**Your stance — argue for bolder parameters:**
+- Position size should be LARGER (e.g. if Trader says 30%, argue for 50%+)
+- Take-profit should be HIGHER (don't cap upside too early)
+- Stop-loss should be WIDER (give the trade room to breathe, avoid being stopped out by noise)
 
-Engage actively by addressing any specific concerns raised, refuting the weaknesses in their logic, and asserting the benefits of risk-taking to outpace market norms. Maintain a focus on debating and persuading, not just presenting data. Challenge each counterpoint to underscore why a high-risk approach is optimal. Output conversationally as if you are speaking without any special formatting."""
+Respond directly to the conservative and neutral analysts' specific counter-arguments. Use data to support why higher risk is justified here.
+
+{data_context}
+Conversation history: {history}
+Last conservative argument: {current_conservative_response}
+Last neutral argument: {current_neutral_response}
+
+If there are no responses from the other viewpoints yet, present your own argument based on the available data. Speak conversationally without special formatting."""
 
         response = llm.invoke(prompt)
 
@@ -50,9 +68,7 @@ Engage actively by addressing any specific concerns raised, refuting the weaknes
             "latest_speaker": "Aggressive",
             "current_aggressive_response": argument,
             "current_conservative_response": risk_debate_state.get("current_conservative_response", ""),
-            "current_neutral_response": risk_debate_state.get(
-                "current_neutral_response", ""
-            ),
+            "current_neutral_response": risk_debate_state.get("current_neutral_response", ""),
             "count": risk_debate_state["count"] + 1,
         }
 

@@ -1,5 +1,3 @@
-from langchain_core.messages import AIMessage
-import time
 import json
 
 
@@ -17,27 +15,46 @@ def create_conservative_debator(llm):
         news_report = state["news_report"]
         fundamentals_report = state["fundamentals_report"]
 
-        trader_decision = state["trader_investment_plan"]
+        # Parse Trader's quantitative plan
+        trader_plan_raw = state["trader_investment_plan"]
+        try:
+            trader_plan = json.loads(trader_plan_raw)
+        except (json.JSONDecodeError, TypeError):
+            trader_plan = {}
+
         count = risk_debate_state.get("count", 0)
 
         if count == 0:
-            data_context = f"""drawing from the following data sources to build a convincing case for a low-risk approach adjustment to the trader's decision:
+            data_context = f"""Draw from the following data sources to build a convincing case for a low-risk approach:
 
 Market Research Report: {market_research_report}
 Social Media Sentiment Report: {sentiment_report}
 Latest World Affairs Report: {news_report}
 Company Fundamentals Report: {fundamentals_report}"""
         else:
-            data_context = "drawing from the debate history to build a convincing case for a low-risk approach adjustment to the trader's decision."
+            data_context = "Draw from the debate history to build a convincing case for a low-risk approach."
 
-        prompt = f"""As the Conservative Risk Analyst, your primary objective is to protect assets, minimize volatility, and ensure steady, reliable growth. You prioritize stability, security, and risk mitigation, carefully assessing potential losses, economic downturns, and market volatility. When evaluating the trader's decision or plan, critically examine high-risk elements, pointing out where the decision may expose the firm to undue risk and where more cautious alternatives could secure long-term gains. Here is the trader's decision:
+        prompt = f"""As the Conservative Risk Analyst, your primary objective is to protect capital and minimize downside risk. You are reviewing the Trader's specific plan and debating whether the parameters expose the firm to excessive risk.
 
-{trader_decision}
+**Trader's Proposed Plan:**
+- Action: {trader_plan.get('action', 'N/A')}
+- Target position: {trader_plan.get('target_position_pct', 'N/A')}% of capital
+- Take-profit: {trader_plan.get('take_profit_price', 'N/A')}
+- Stop-loss: {trader_plan.get('stop_loss_price', 'N/A')}
 
-Your task is to actively counter the arguments of the Aggressive and Neutral Analysts, highlighting where their views may overlook potential threats or fail to prioritize sustainability. Respond directly to their points, {data_context}
-Here is the current conversation history: {history} Here is the last response from the aggressive analyst: {current_aggressive_response} Here is the last response from the neutral analyst: {current_neutral_response}. If there are no responses from the other viewpoints yet, present your own argument based on the available data.
+**Your stance — argue for safer parameters:**
+- Position size should be SMALLER (e.g. if Trader says 40%, argue for 20% or less)
+- Take-profit should be LOWER (secure gains earlier, don't get greedy)
+- Stop-loss should be TIGHTER (limit maximum loss per trade)
 
-Engage by questioning their optimism and emphasizing the potential downsides they may have overlooked. Address each of their counterpoints to showcase why a conservative stance is ultimately the safest path for the firm's assets. Focus on debating and critiquing their arguments to demonstrate the strength of a low-risk strategy over their approaches. Output conversationally as if you are speaking without any special formatting."""
+Respond directly to the aggressive and neutral analysts' specific arguments. Point out where their optimism ignores concrete risks.
+
+{data_context}
+Conversation history: {history}
+Last aggressive argument: {current_aggressive_response}
+Last neutral argument: {current_neutral_response}
+
+If there are no responses from the other viewpoints yet, present your own argument based on the available data. Speak conversationally without special formatting."""
 
         response = llm.invoke(prompt)
 
@@ -49,13 +66,9 @@ Engage by questioning their optimism and emphasizing the potential downsides the
             "conservative_history": conservative_history + "\n" + argument,
             "neutral_history": risk_debate_state.get("neutral_history", ""),
             "latest_speaker": "Conservative",
-            "current_aggressive_response": risk_debate_state.get(
-                "current_aggressive_response", ""
-            ),
+            "current_aggressive_response": risk_debate_state.get("current_aggressive_response", ""),
             "current_conservative_response": argument,
-            "current_neutral_response": risk_debate_state.get(
-                "current_neutral_response", ""
-            ),
+            "current_neutral_response": risk_debate_state.get("current_neutral_response", ""),
             "count": risk_debate_state["count"] + 1,
         }
 
