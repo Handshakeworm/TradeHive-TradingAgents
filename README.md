@@ -1,6 +1,6 @@
-# 此项目为基于tauric reasearch开源的TradingAgents: Multi-Agents LLM Financial Trading Framework的multi-agent项目
+### 此项目为基于tauric reasearch开源的TradingAgents: Multi-Agents LLM Financial Trading Framework的multi-agent项目改编
 
-## 以下为简要介绍，此后作者会完善详细的对原系统的升级内容
+## 以下为简要介绍，此后作者会完善详细的对原系统的升级内容，如您感兴趣可以浏览'项目介绍.md'
 
 我们的项目实现了原先项目基础上，200%至500%的收益提升
 
