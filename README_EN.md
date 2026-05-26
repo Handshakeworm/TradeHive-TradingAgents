@@ -11,7 +11,7 @@
 > A multi-agent LLM framework for financial trading decisions, redesigned from [TauricResearch/TradingAgents](https://github.com/TauricResearch/TradingAgents).
 > Through a **hard-discipline + soft-judgment hybrid architecture**, TradeHive combines the LLM's adversarial analysis capability with code-level risk guardrails, delivering reproducible, low-drawdown trend-following decisions.
 
-![NVDA backtest – portfolio performance](image.png)
+![TradeHive 6-month NVDA backtest: portfolio value vs Buy & Hold](assets/NVDA_Backtest.png)
 
 ---
 
@@ -45,7 +45,7 @@
 
 **Key observation**: In a volatile NVDA period (a -30% selloff in late February followed by a strong rally starting in May), TradeHive kept drawdown to **-3.2%** (one-tenth of Buy & Hold) while outperforming B&H by 18.7 percentage points over the full window.
 
-![NVDA drawdown comparison](image-1.png)
+![NVDA drawdown comparison across strategies](assets/NVDA_Backtest_Drawdown.png)
 
 #### Why didn't TradeHive beat RSI / Momentum?
 
@@ -75,7 +75,7 @@ On NVDA, TradeHive's cumulative return (+43.9%) sits between RSI (+53.5%) and Mo
 | Daily Win Rate | 36.5% | — |
 | Total Trades | 33 | — |
 
-![META backtest](image-2.png)
+![META backtest](assets/META_Backtest.png)
 
 > Note: Position preferences can be freely adjusted in the Trader/PM prompts and in the code-layer `REGIME_POSITION_LIMITS`. Results above use the default `confirmed_uptrend` band of 75–100%.
 
@@ -125,7 +125,7 @@ This division keeps the LLM's unreliable parts bounded by code guardrails while 
 | Cross-day continuity | `prev_regime` label only | **Residual connection**: entry thesis + daily deltas |
 | Confirmed entry/exit | No threshold | 6-of-5 / 5-of-4 hard thresholds |
 | Output format | Free-form text | Structured output + retry |
-| NVDA same-period result | -30%+ max DD, randomly good or bad | -3.2% max DD, reproducible |
+| NVDA same-period result | -30%+ max DD (failed to respond to the 2025-02-14 selloff); cumulative return varies wildly across re-runs and is not reproducible | -3.2% max DD; entry/exit transitions stable across re-runs |
 
 For the detailed comparison, see [DEV_SPEC_EN.md §6.3](DEV_SPEC_EN.md#63-vs-baseline-and-single-agent).
 
@@ -133,32 +133,52 @@ For the detailed comparison, see [DEV_SPEC_EN.md §6.3](DEV_SPEC_EN.md#63-vs-bas
 
 ## System Architecture
 
-```
-START
-  │
-  ├─► 5 Analysts (parallel)       ── Market · Sentiment · News · Fundamentals · Macro
-  │       │
-  │       ▼
-  │   Aggregator
-  │       │
-  ├─► Bull / Bear Researcher      ── parallel structured eval: 4-dim evidence + scores + reversal_signals
-  │       │
-  │       ▼
-  │   Research Manager             ── 7-regime classification (regime only, no trade decision)
-  │       │
-  │       ▼
-  │   Trader                       ── Execution Planner: regime → target_position_pct
-  │       │
-  │       ▼
-  │   Risk Debate (3-way)          ── Aggressive / Conservative / Neutral debate target_pct
-  │       │
-  │       ▼
-  │   Portfolio Manager            ── Final arbiter, outputs final_trade_decision
-  │       │
-  └────► Executed at T+1 open at target_position_pct
+```mermaid
+flowchart TD
+    START([START])
+
+    %% ===== Stage 1: 5 analysts parallel (Fan-out) =====
+    START --> MA & SA & NA & FA & MCA
+
+    subgraph Analysts[" "]
+        direction LR
+        MA["① Market Analyst<br/>(quick_think)"]
+        SA["② Sentiment Analyst<br/>(quick_think)"]
+        NA["③ News Analyst<br/>(deep_think)"]
+        FA["④ Fundamentals Analyst<br/>(quick_think)"]
+        MCA["⑤ Macro Analyst<br/>(quick_think)"]
+    end
+    style Analysts fill:transparent,stroke:transparent
+
+    MA & SA & NA & FA & MCA --> AGG["Analyst Aggregator<br/>(clean messages)"]
+
+    %% ===== Stage 2: Bull/Bear parallel structured eval (no tools, no debate) =====
+    AGG --> Bull["Bull Researcher<br/>(deep_think)<br/>→ BullBearEvaluation JSON"]
+    AGG --> Bear["Bear Researcher<br/>(deep_think)<br/>→ BullBearEvaluation JSON"]
+
+    Bull --> RM["Research Manager<br/>(deep_think)"]
+    Bear --> RM
+
+    %% ===== Stage 3: Regime classification + trade plan =====
+    RM --> Trader["Trader<br/>(deep_think)"]
+
+    %% ===== Stage 4: Risk debate (no tools) =====
+    Trader --> Agg["Aggressive Analyst<br/>(quick_think)"]
+
+    Agg -->|"< max_rounds"| Con["Conservative Analyst<br/>(quick_think)"]
+    Agg -->|"≥ max_rounds"| PM["Portfolio Manager<br/>(deep_think)"]
+
+    Con -->|"< max_rounds"| Neu["Neutral Analyst<br/>(quick_think)"]
+    Con -->|"≥ max_rounds"| PM
+
+    Neu -->|"< max_rounds"| Agg
+    Neu -->|"≥ max_rounds"| PM
+
+    %% ===== Output =====
+    PM --> END([END])
 ```
 
-Full mermaid flowchart and node-level responsibilities: [DEV_SPEC_EN.md §2.1](DEV_SPEC_EN.md#21-new-flowchart).
+Per-node responsibilities: [DEV_SPEC_EN.md §2.1](DEV_SPEC_EN.md#21-new-flowchart).
 
 ---
 
@@ -190,7 +210,7 @@ bottoming           → consolidation / early_uptrend / early_downtrend
 
 > Both Trader and PM nodes run a `REGIME_POSITION_LIMITS` clamp, forcing any out-of-band LLM output back into the allowed range and rewriting the action label.
 
-For detailed confirmed-entry/exit thresholds and the residual-connection mechanism, see [DEV_SPEC_EN.md §5](DEV_SPEC_EN.md#5-backtest-engine-design).
+For detailed confirmed-entry/exit thresholds and the residual-connection mechanism, see [DEV_SPEC_EN.md §5](DEV_SPEC_EN.md#5-backtest-engine-design). The full **per-day Bull/Bear scoring + regime transition log** across the entire NVDA backtest (showing the 6-of-5 / 5-of-4 hard thresholds firing in practice) is in [DEV_SPEC_EN.md §6.2](DEV_SPEC_EN.md#62-regime-identification-effectiveness).
 
 ---
 
@@ -205,8 +225,8 @@ For detailed confirmed-entry/exit thresholds and the residual-connection mechani
 ### Installation
 
 ```bash
-git clone <your-repo-url>
-cd TradeHive-main
+git clone https://github.com/Handshakeworm/TradeHive-TradingAgents.git
+cd TradeHive-TradingAgents
 
 # Install dependencies (a venv is recommended)
 pip install -e .
@@ -215,6 +235,26 @@ pip install -e .
 cp .env.example .env
 # Edit .env and fill in the relevant API keys
 ```
+
+### LLM configuration
+
+The system uses **two model tiers**:
+
+- **`deep_think_llm`** — drives nodes that need long-context + structured reasoning: News Analyst, Bull / Bear Researcher, Research Manager, Trader, Portfolio Manager
+- **`quick_think_llm`** — drives the 4 tool-heavy Analysts (Market / Sentiment / Fundamentals / Macro), the 3 Risk Debaters (Aggressive / Conservative / Neutral), Reflector, Signal Processor
+
+Configure in [main.py](main.py) or [tradingagents/default_config.py](tradingagents/default_config.py):
+
+```python
+config["llm_provider"] = "openrouter"   # openai / anthropic / google / xai / openrouter
+config["backend_url"]  = "https://openrouter.ai/api/v1"
+config["deep_think_llm"]  = "deepseek/deepseek-v3.2"
+config["quick_think_llm"] = "xiaomi/mimo-v2-flash"
+```
+
+> **All backtest results in this README use the following setup**:
+> `llm_provider=openrouter`, `deep_think_llm=deepseek/deepseek-v3.2`, `quick_think_llm=xiaomi/mimo-v2-flash`, `max_risk_discuss_rounds=1`.
+> Switching providers/models may produce results that differ from the numbers above.
 
 ### Run a backtest
 

@@ -11,7 +11,7 @@
 > 基于 [TauricResearch/TradingAgents](https://github.com/TauricResearch/TradingAgents) 二次开发的多智能体 LLM 金融交易决策框架。
 > 通过 **硬纪律 + 软判断的混合架构**，把 LLM 的对抗性分析能力和代码层的风控兜底结合起来，实现可复现、低回撤的趋势交易决策。
 
-![NVDA 回测组合表现](image.png)
+![TradeHive 在 NVDA 上的 6 个月回测：组合净值 vs Buy & Hold](assets/NVDA_Backtest.png)
 
 ---
 
@@ -45,7 +45,7 @@
 
 **核心观察**：在面对 NVDA 这种 2 月底 -30% 暴跌、5 月开始强反弹的剧烈行情中，TradeHive 把回撤压在 **-3.2%**（B&H 的 1/10），同时全程跑赢 B&H 18.7 个百分点。
 
-![NVDA 各策略回撤对比](image-1.png)
+![NVDA 各策略回撤对比](assets/NVDA_Backtest_Drawdown.png)
 
 #### 为什么没有超过 RSI / Momentum 这类传统策略？
 
@@ -75,7 +75,7 @@ NVDA 表上 TradeHive 的累计收益（+43.9%）介于 RSI（+53.5%）和 Momen
 | 日胜率 | 36.5% | — |
 | 总交易次数 | 33 | — |
 
-![META 回测](image-2.png)
+![META 回测](assets/META_Backtest.png)
 
 > 说明：仓位偏好可在 Trader/PM 节点的 prompt 与代码层 `REGIME_POSITION_LIMITS` 中自由调整；以上结果使用默认的 confirmed_uptrend 75-100% 区间。
 
@@ -125,7 +125,7 @@ NVDA 表上 TradeHive 的累计收益（+43.9%）介于 RSI（+53.5%）和 Momen
 | 跨日连贯性 | 仅传 `prev_regime` 标签 | **残差连接**：entry thesis + daily deltas |
 | Confirmed 进入/退出 | 无门槛 | 6 选 5 / 5 选 4 硬阈值 |
 | 输出格式 | 自由文本 | structured output + 重试 |
-| NVDA 同期表现 | 最大回撤 -30%+，随机时好时坏 | 最大回撤 -3.2%，可复现 |
+| NVDA 同期表现 | 最大回撤 -30%+（无法响应 2-14 起的连续下探）；多次回测累计收益波动巨大、不可复现 | 最大回撤 -3.2%，多次回测进入/退出节点稳定 |
 
 详细对照见 [DEV_SPEC.md §6.3](DEV_SPEC.md#63-与-baseline-以及-single-agent-对比)。
 
@@ -133,32 +133,52 @@ NVDA 表上 TradeHive 的累计收益（+43.9%）介于 RSI（+53.5%）和 Momen
 
 ## 系统架构
 
-```
-START
-  │
-  ├─► 5 Analysts (并行)          ── Market · Sentiment · News · Fundamentals · Macro
-  │       │
-  │       ▼
-  │   Aggregator
-  │       │
-  ├─► Bull / Bear Researcher    ── 并行结构化评估，4 维 evidence + scores + reversal_signals
-  │       │
-  │       ▼
-  │   Research Manager           ── 7-regime 判定（仅判 regime，不做交易决策）
-  │       │
-  │       ▼
-  │   Trader                     ── Execution Planner：regime → target_position_pct
-  │       │
-  │       ▼
-  │   Risk Debate (3-way)        ── Aggressive / Conservative / Neutral 围绕 target_pct 攻防
-  │       │
-  │       ▼
-  │   Portfolio Manager          ── 最终裁决，输出 final_trade_decision
-  │       │
-  └────► T+1 开盘以 target_position_pct 执行
+```mermaid
+flowchart TD
+    START([START])
+
+    %% ===== 第一阶段：5 个分析师并行（Fan-out） =====
+    START --> MA & SA & NA & FA & MCA
+
+    subgraph Analysts[" "]
+        direction LR
+        MA["① Market Analyst<br/>(quick_think)"]
+        SA["② Sentiment Analyst<br/>(quick_think)"]
+        NA["③ News Analyst<br/>(deep_think)"]
+        FA["④ Fundamentals Analyst<br/>(quick_think)"]
+        MCA["⑤ Macro Analyst<br/>(quick_think)"]
+    end
+    style Analysts fill:transparent,stroke:transparent
+
+    MA & SA & NA & FA & MCA --> AGG["Analyst Aggregator<br/>(clean messages)"]
+
+    %% ===== 第二阶段：Bull/Bear 并行结构化评估（无工具，无辩论） =====
+    AGG --> Bull["Bull Researcher<br/>(deep_think)<br/>→ BullBearEvaluation JSON"]
+    AGG --> Bear["Bear Researcher<br/>(deep_think)<br/>→ BullBearEvaluation JSON"]
+
+    Bull --> RM["Research Manager<br/>(deep_think)"]
+    Bear --> RM
+
+    %% ===== 第三阶段：Regime 判定 + 交易计划 =====
+    RM --> Trader["Trader<br/>(deep_think)"]
+
+    %% ===== 第四阶段：风控辩论（无工具） =====
+    Trader --> Agg["Aggressive Analyst<br/>(quick_think)"]
+
+    Agg -->|"< max_rounds"| Con["Conservative Analyst<br/>(quick_think)"]
+    Agg -->|"≥ max_rounds"| PM["Portfolio Manager<br/>(deep_think)"]
+
+    Con -->|"< max_rounds"| Neu["Neutral Analyst<br/>(quick_think)"]
+    Con -->|"≥ max_rounds"| PM
+
+    Neu -->|"< max_rounds"| Agg
+    Neu -->|"≥ max_rounds"| PM
+
+    %% ===== 输出 =====
+    PM --> END([END])
 ```
 
-完整 mermaid 流程图与每个节点的详细职责见 [DEV_SPEC.md §2.1](DEV_SPEC.md#21-新流程图)。
+每个节点的详细职责见 [DEV_SPEC.md §2.1](DEV_SPEC.md#21-新流程图)。
 
 ---
 
@@ -190,7 +210,7 @@ bottoming           → consolidation / early_uptrend / early_downtrend
 
 > Trader 和 PM 节点都会做一次 `REGIME_POSITION_LIMITS` clamp，确保 LLM 越界值被强制截断并重写 action 标签。
 
-详细 confirmed 进入/退出阈值、残差连接机制等见 [DEV_SPEC.md §5](DEV_SPEC.md#5-回测引擎设计)。
+详细 confirmed 进入/退出阈值、残差连接机制等见 [DEV_SPEC.md §5](DEV_SPEC.md#5-回测引擎设计)；NVDA 整个回测期的**每日 Bull/Bear 打分 + regime 切换实录**（用于验证 6 选 5 / 5 选 4 硬阈值真实生效）见 [DEV_SPEC.md §6.2](DEV_SPEC.md#62-regime-识别效果每日打分)。
 
 ---
 
@@ -205,8 +225,8 @@ bottoming           → consolidation / early_uptrend / early_downtrend
 ### 安装
 
 ```bash
-git clone <your-repo-url>
-cd TradeHive-main
+git clone https://github.com/Handshakeworm/TradeHive-TradingAgents.git
+cd TradeHive-TradingAgents
 
 # 安装依赖（推荐使用虚拟环境）
 pip install -e .
@@ -215,6 +235,26 @@ pip install -e .
 cp .env.example .env
 # 编辑 .env，填入对应 API Key
 ```
+
+### LLM 配置
+
+系统使用 **两档模型**：
+
+- **`deep_think_llm`**：用于 News Analyst、Bull / Bear Researcher、Research Manager、Trader、Portfolio Manager 等需要长上下文 + 结构化推理的节点
+- **`quick_think_llm`**：用于 Market / Sentiment / Fundamentals / Macro 4 个 Analyst、3 方 Risk Debate（Aggressive / Conservative / Neutral）、Reflector、Signal Processor 等节点
+
+在 [main.py](main.py) 或 [tradingagents/default_config.py](tradingagents/default_config.py) 中配置：
+
+```python
+config["llm_provider"] = "openrouter"   # openai / anthropic / google / xai / openrouter
+config["backend_url"]  = "https://openrouter.ai/api/v1"
+config["deep_think_llm"]  = "deepseek/deepseek-v3.2"
+config["quick_think_llm"] = "xiaomi/mimo-v2-flash"
+```
+
+> **README 中所有回测结果均使用以下配置**：
+> `llm_provider=openrouter`，`deep_think_llm=deepseek/deepseek-v3.2`，`quick_think_llm=xiaomi/mimo-v2-flash`，`max_risk_discuss_rounds=1`。
+> 更换 provider/模型后，结果可能与 README 数字存在差异。
 
 ### 运行回测
 
